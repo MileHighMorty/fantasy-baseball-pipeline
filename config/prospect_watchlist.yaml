@@ -1,10 +1,14 @@
 prospects:
   - name: Sebastian Walcott
+    player_id: 808989
     team: TEX
     position: SS
+    level: Double-A
     notes: ""
 
   - name: Jackson Holliday
+    player_id: 695370
     team: BAL
     position: 2B
+    level: Triple-A
     notes: ""
