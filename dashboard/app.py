@@ -36,7 +36,8 @@ def _load_my_roster() -> set[str]:
     df = _latest_fantrax("my_roster")
     if df is None:
         return set()
-    return set(df.loc[df["player_name"].notna(), "player_name"].str.strip())
+    names = df.loc[df["player_name"].notna(), "player_name"].str.strip()
+    return set(names[names != "None"])
 
 
 def _load_my_roster_df() -> pd.DataFrame | None:
@@ -139,98 +140,106 @@ def page_session_prep():
         "is unlucky and due for better results, negative red means they're getting lucky "
         "and regression is likely."
     )
-    my_names = _load_my_roster()
+
+    # Start from FULL Fantrax roster, split by position
     my_roster_df = _load_my_roster_df()
-    if not my_names:
+    if my_roster_df is None or my_roster_df.empty:
         st.warning("Could not load my_roster CSV from Fantrax data.")
+        return
 
-    hitters = _load_parquet(SILVER / "statcast_hitters.parquet")
-    pitchers = _load_parquet(SILVER / "statcast_pitchers.parquet")
+    # Drop empty roster slots (player_name is "None" or NaN)
+    my_roster_df = my_roster_df[
+        my_roster_df["player_name"].notna()
+        & (my_roster_df["player_name"] != "None")
+    ].copy()
 
-    roster_frames = []
-    if hitters is not None:
-        h = hitters.copy()
-        h["player_type"] = "Hitter"
-        roster_frames.append(h)
-    if pitchers is not None:
-        p = pitchers.copy()
-        p["player_type"] = "Pitcher"
-        roster_frames.append(p)
+    _PITCHER_POSITIONS = {"SP", "RP", "P"}
+    my_roster_df["player_type"] = my_roster_df["fantrax_position"].apply(
+        lambda p: "Pitcher" if p in _PITCHER_POSITIONS else "Hitter"
+    )
 
-    if roster_frames:
-        roster = pd.concat(roster_frames, ignore_index=True)
-        # Filter to only my Fantrax roster players
-        if my_names:
-            roster = roster[roster["player_name"].isin(my_names)]
-            if roster.empty:
-                st.info("No statcast data found for your roster players yet.")
-        # Merge Fantrax position data to replace statcast position
-        if my_roster_df is not None:
-            roster = roster.merge(my_roster_df, on="player_name", how="left")
-            roster["position"] = roster["fantrax_position"].fillna(roster.get("position", ""))
-            roster.drop(columns=["fantrax_position"], inplace=True)
+    hitters_statcast = _load_parquet(SILVER / "statcast_hitters.parquet")
+    pitchers_statcast = _load_parquet(SILVER / "statcast_pitchers.parquet")
 
-        # Position sort order for hitters
-        _POS_ORDER = {"C": 0, "1B": 1, "2B": 2, "3B": 3, "SS": 4, "OF": 5, "UT": 6}
+    roster_hitters = my_roster_df[my_roster_df["player_type"] == "Hitter"].copy()
+    roster_pitchers = my_roster_df[my_roster_df["player_type"] == "Pitcher"].copy()
 
-        hit_col, pit_col = st.columns(2)
+    # LEFT JOIN statcast data onto roster so every rostered player appears
+    # Drop overlapping non-key columns from statcast before merge to avoid suffixes
+    if hitters_statcast is not None:
+        h_stat = hitters_statcast.drop(columns=["position"], errors="ignore")
+        roster_hitters = roster_hitters.merge(h_stat, on="player_name", how="left")
+    if pitchers_statcast is not None:
+        p_stat = pitchers_statcast.drop(columns=["position"], errors="ignore")
+        roster_pitchers = roster_pitchers.merge(p_stat, on="player_name", how="left")
 
-        # --- Hitters table (left) ---
-        with hit_col:
-            st.markdown("**Hitters**")
-            hit_df = roster[roster["player_type"] == "Hitter"].copy()
-            if not hit_df.empty:
-                gap_col = "xwoba_minus_woba" if "xwoba_minus_woba" in hit_df.columns else "est_woba_minus_woba_diff"
-                hit_df["_pos_rank"] = hit_df["position"].map(_POS_ORDER).fillna(99)
-                sort_cols = ["_pos_rank"]
-                sort_asc = [True]
-                if gap_col in hit_df.columns:
-                    sort_cols.append(gap_col)
-                    sort_asc.append(False)
-                hit_df = hit_df.sort_values(sort_cols, ascending=sort_asc).drop(columns=["_pos_rank"])
+    # Use Fantrax position as the display position
+    for df in (roster_hitters, roster_pitchers):
+        df["position"] = df["fantrax_position"]
 
-                h_display = ["player_name", "team", "position"]
-                if "woba" in hit_df.columns:
-                    h_display.append("woba")
-                if "est_woba" in hit_df.columns:
-                    h_display.append("est_woba")
-                if gap_col in hit_df.columns:
-                    h_display.append(gap_col)
+    # Position sort order for hitters
+    _POS_ORDER = {"C": 0, "1B": 1, "2B": 2, "3B": 3, "SS": 4, "OF": 5, "UT": 6}
 
-                fmt = {c: "{:.3f}" for c in h_display if c not in ("player_name", "team", "position")}
-                styled_h = hit_df[h_display].style.format(fmt)
-                if gap_col in hit_df.columns:
-                    styled_h = styled_h.map(_color_xwoba_gap, subset=[gap_col])
-                st.dataframe(styled_h, use_container_width=True, hide_index=True,
-                             height=max(400, 35 * len(hit_df) + 40))
-            else:
-                st.info("No hitter statcast data available.")
+    hit_col, pit_col = st.columns(2)
 
-        # --- Pitchers table (right) ---
-        with pit_col:
-            st.markdown("**Pitchers**")
-            pit_df = roster[roster["player_type"] == "Pitcher"].copy()
-            if not pit_df.empty:
-                era_gap = "xera_minus_era" if "xera_minus_era" in pit_df.columns else None
-                if era_gap and era_gap in pit_df.columns:
-                    pit_df = pit_df.sort_values(era_gap, ascending=False)
+    # --- Hitters table (left) ---
+    with hit_col:
+        st.markdown("**Hitters**")
+        hit_df = roster_hitters.copy()
+        if not hit_df.empty:
+            gap_col = "xwoba_minus_woba" if "xwoba_minus_woba" in hit_df.columns else "est_woba_minus_woba_diff"
+            hit_df["_pos_rank"] = hit_df["position"].map(_POS_ORDER).fillna(99)
+            sort_cols = ["_pos_rank"]
+            sort_asc = [True]
+            if gap_col in hit_df.columns:
+                sort_cols.append(gap_col)
+                sort_asc.append(False)
+            hit_df = hit_df.sort_values(sort_cols, ascending=sort_asc).drop(columns=["_pos_rank"])
 
-                p_display = ["player_name", "team", "position"]
-                if "xera" in pit_df.columns:
-                    p_display.append("xera")
-                if "era" in pit_df.columns:
-                    p_display.append("era")
-                if era_gap and era_gap in pit_df.columns:
-                    p_display.append(era_gap)
+            h_display = ["player_name", "team", "position"]
+            if "woba" in hit_df.columns:
+                h_display.append("woba")
+            if "est_woba" in hit_df.columns:
+                h_display.append("est_woba")
+            if gap_col in hit_df.columns:
+                h_display.append(gap_col)
 
-                fmt = {c: "{:.2f}" for c in p_display if c not in ("player_name", "team", "position")}
-                styled_p = pit_df[p_display].style.format(fmt)
-                if era_gap and era_gap in pit_df.columns:
-                    styled_p = styled_p.map(_color_xwoba_gap, subset=[era_gap])
-                st.dataframe(styled_p, use_container_width=True, hide_index=True,
-                             height=max(400, 35 * len(pit_df) + 40))
-            else:
-                st.info("No pitcher statcast data available.")
+            fmt = {c: "{:.3f}" for c in h_display if c not in ("player_name", "team", "position")}
+            styled_h = hit_df[h_display].style.format(fmt, na_rep="N/A")
+            if gap_col in hit_df.columns:
+                styled_h = styled_h.map(_color_xwoba_gap, subset=[gap_col])
+            st.dataframe(styled_h, use_container_width=True, hide_index=True,
+                         height=max(400, 35 * len(hit_df) + 40))
+        else:
+            st.info("No hitters on roster.")
+
+    # --- Pitchers table (right) ---
+    with pit_col:
+        st.markdown("**Pitchers**")
+        pit_df = roster_pitchers.copy()
+        if not pit_df.empty:
+            era_gap = "xera_minus_era" if "xera_minus_era" in pit_df.columns else None
+            if era_gap and era_gap in pit_df.columns:
+                # Sort pitchers with data first (by gap desc), then those without data
+                pit_df["_has_data"] = pit_df[era_gap].notna().astype(int)
+                pit_df = pit_df.sort_values(["_has_data", era_gap], ascending=[False, False]).drop(columns=["_has_data"])
+
+            p_display = ["player_name", "team", "position"]
+            if "xera" in pit_df.columns:
+                p_display.append("xera")
+            if "era" in pit_df.columns:
+                p_display.append("era")
+            if era_gap and era_gap in pit_df.columns:
+                p_display.append(era_gap)
+
+            fmt = {c: "{:.2f}" for c in p_display if c not in ("player_name", "team", "position")}
+            styled_p = pit_df[p_display].style.format(fmt, na_rep="N/A")
+            if era_gap and era_gap in pit_df.columns:
+                styled_p = styled_p.map(_color_xwoba_gap, subset=[era_gap])
+            st.dataframe(styled_p, use_container_width=True, hide_index=True,
+                         height=max(400, 35 * len(pit_df) + 40))
+        else:
+            st.info("No pitchers on roster.")
 
     # --- Breakout adds (free agents only) ---
     col1, col2 = st.columns(2)
@@ -257,64 +266,13 @@ def page_session_prep():
             st.dataframe(bp[show_cols].head(10), use_container_width=True, hide_index=True)
 
 
-def page_breakout_board():
-    st.header("Breakout Board")
-
-    st.caption(
-        "Players above the diagonal line have actual wOBA lower than their expected wOBA "
-        "— meaning their underlying contact quality is better than their results show. "
-        "These are buy candidates. Players below the line are overperforming their Statcast "
-        "profile and may regress. Dot size reflects hard-hit percentage. Hover over any dot "
-        "for the full profile."
-    )
-
-    bh = _load_csv(GOLD / "breakout_hitters_all.csv")
-    if bh is None:
-        return
-
-    required = {"est_woba", "woba", "player_name", "team"}
-    if not required.issubset(bh.columns):
-        st.error(f"Missing columns. Need {required}, have {set(bh.columns)}")
-        return
-
-    # Ownership comes pre-tagged from breakout_detector
-    if "ownership" not in bh.columns:
-        bh["ownership"] = "Unknown"
-
-    # Use actual team names for the legend (FA stays as-is)
-    bh["status"] = bh["ownership"]
-
-    size_col = "hard_hit_percentile" if "hard_hit_percentile" in bh.columns else None
-    if size_col is None and "avg_hit_speed" in bh.columns:
-        size_col = "avg_hit_speed"
-
-    # Extract last name + team abbreviation for FA text labels
-    bh["label"] = bh["player_name"].str.split().str[-1] + " (" + bh["team"] + ")"
-
-    # Build hover tooltip fields using actual column names
-    hover_fields = {
-        "player_name": True,
-        "team": True,
-        "position": True,
-        "est_woba": ":.3f",
-        "woba": ":.3f",
-    }
-    for hf in ["xwoba_minus_woba", "est_woba_minus_woba_diff"]:
-        if hf in bh.columns:
-            hover_fields[hf] = ":.3f"
-            break
-    if "hard_hit_percentile" in bh.columns:
-        hover_fields["hard_hit_percentile"] = ":.1f"
-    if "brl_percent" in bh.columns:
-        hover_fields["brl_percent"] = ":.1f"
-
-    # Build color/symbol/opacity maps for all 12 teams + FA
+def _breakout_style_maps():
+    """Return shared color/symbol/opacity maps for breakout charts."""
     _LEAGUE_TEAMS = [
         "Ben", "Chad", "George", "J-Rod Show", "Jorp", "Luke",
         "Mullets", "Negs", "One Pathetic Luzar", "Porter",
         "Professor McGonigle", "Rutsch Hour",
     ]
-    # Owned team palette (distinct colors for each team)
     _TEAM_COLORS = [
         "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c", "#3498db",
         "#9b59b6", "#e84393", "#fd79a8", "#00cec9", "#6c5ce7", "#ffeaa7",
@@ -326,68 +284,176 @@ def page_breakout_board():
         color_map[team] = _TEAM_COLORS[i]
         symbol_map[team] = "star" if team == MY_TEAM else "diamond"
         opacity_map[team] = 1.0 if team == MY_TEAM else 0.4
+    return color_map, symbol_map, opacity_map
 
-    # Ensure FA dots are larger by adding a size boost column
-    if size_col:
-        bh["_plot_size"] = bh[size_col]
-        bh.loc[bh["status"] == "FA", "_plot_size"] = bh.loc[bh["status"] == "FA", size_col] * 1.4
-        plot_size_col = "_plot_size"
+
+def _add_ownership(df: pd.DataFrame) -> pd.DataFrame:
+    """Add ownership column if not already present, using all_rosters data."""
+    if "ownership" in df.columns:
+        df["status"] = df["ownership"]
+        return df
+    all_rosters = _load_all_rosters()
+    my_names = _load_my_roster()
+    if all_rosters is not None:
+        df["status"] = df["player_name"].apply(
+            lambda n: _ownership_status(n, all_rosters, my_names)
+        )
     else:
-        plot_size_col = None
+        df["status"] = df["player_name"].apply(
+            lambda n: MY_TEAM if n in my_names else "Unknown"
+        )
+    return df
 
-    category_order = ["FA"] + sorted(set(bh["status"].unique()) - {"FA"})
 
-    fig = px.scatter(
-        bh,
-        x="est_woba",
-        y="woba",
-        color="status",
-        color_discrete_map=color_map,
-        symbol="status",
-        symbol_map=symbol_map,
-        size=plot_size_col,
-        size_max=20,
-        hover_data=hover_fields,
-        labels={"est_woba": "xwOBA (Expected)", "woba": "wOBA (Actual)", "status": "Owner"},
-        title="xwOBA vs wOBA — Players Above the Line Are Underperforming (Buy Candidates)",
-        category_orders={"status": category_order},
+def page_breakout_board():
+    st.header("Breakout Board")
+
+    color_map, symbol_map, opacity_map = _breakout_style_maps()
+
+    # ---- Hitter Breakout Board ----
+    st.subheader("Hitter Breakout Board")
+    st.caption(
+        "Players above the line have better underlying contact quality than their "
+        "results show. Buy candidates."
     )
 
-    # Set opacity per trace so owned players fade into the background
-    for trace in fig.data:
-        trace.opacity = opacity_map.get(trace.name, 0.6)
+    bh = _load_csv(GOLD / "breakout_hitters_all.csv")
+    if bh is not None:
+        required = {"est_woba", "woba", "player_name", "team"}
+        if not required.issubset(bh.columns):
+            st.error(f"Missing columns. Need {required}, have {set(bh.columns)}")
+        else:
+            bh = _add_ownership(bh)
 
-    # Add visible text labels (last name + team) on FA dots only
-    fa_data = bh[bh["status"] == "FA"]
-    if not fa_data.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=fa_data["est_woba"],
-                y=fa_data["woba"] + 0.004,
-                mode="text",
-                text=fa_data["label"],
-                textposition="top center",
-                textfont=dict(size=12, color="white"),
-                showlegend=False,
-                hoverinfo="skip",
+            size_col = "hard_hit_percentile" if "hard_hit_percentile" in bh.columns else None
+            if size_col is None and "avg_hit_speed" in bh.columns:
+                size_col = "avg_hit_speed"
+
+            bh["label"] = bh["player_name"].str.split().str[-1] + " (" + bh["team"] + ")"
+
+            hover_fields = {
+                "player_name": True, "team": True, "position": True,
+                "est_woba": ":.3f", "woba": ":.3f",
+            }
+            for hf in ["xwoba_minus_woba", "est_woba_minus_woba_diff"]:
+                if hf in bh.columns:
+                    hover_fields[hf] = ":.3f"
+                    break
+            if "hard_hit_percentile" in bh.columns:
+                hover_fields["hard_hit_percentile"] = ":.1f"
+            if "brl_percent" in bh.columns:
+                hover_fields["brl_percent"] = ":.1f"
+
+            if size_col:
+                bh["_plot_size"] = bh[size_col]
+                bh.loc[bh["status"] == "FA", "_plot_size"] = bh.loc[bh["status"] == "FA", size_col] * 1.4
+                plot_size_col = "_plot_size"
+            else:
+                plot_size_col = None
+
+            category_order = ["FA"] + sorted(set(bh["status"].unique()) - {"FA"})
+
+            fig_h = px.scatter(
+                bh, x="est_woba", y="woba",
+                color="status", color_discrete_map=color_map,
+                symbol="status", symbol_map=symbol_map,
+                size=plot_size_col, size_max=20,
+                hover_data=hover_fields,
+                labels={"est_woba": "xwOBA (Expected)", "woba": "wOBA (Actual)", "status": "Owner"},
+                title="xwOBA vs wOBA",
+                category_orders={"status": category_order},
             )
-        )
+            for trace in fig_h.data:
+                trace.opacity = opacity_map.get(trace.name, 0.6)
 
-    # Diagonal x=y line — white dashed for visibility on dark background
-    lo = min(bh["est_woba"].min(), bh["woba"].min()) - 0.010
-    hi = max(bh["est_woba"].max(), bh["woba"].max()) + 0.010
-    fig.add_trace(
-        go.Scatter(
-            x=[lo, hi], y=[lo, hi],
-            mode="lines",
-            line=dict(dash="dash", color="white", width=2),
-            showlegend=False,
-            name="x = y",
-        )
+            fa_data = bh[bh["status"] == "FA"]
+            if not fa_data.empty:
+                fig_h.add_trace(go.Scatter(
+                    x=fa_data["est_woba"], y=fa_data["woba"] + 0.004,
+                    mode="text", text=fa_data["label"], textposition="top center",
+                    textfont=dict(size=12, color="white"),
+                    showlegend=False, hoverinfo="skip",
+                ))
+
+            lo = min(bh["est_woba"].min(), bh["woba"].min()) - 0.010
+            hi = max(bh["est_woba"].max(), bh["woba"].max()) + 0.010
+            fig_h.add_trace(go.Scatter(
+                x=[lo, hi], y=[lo, hi], mode="lines",
+                line=dict(dash="dash", color="white", width=2),
+                showlegend=False, name="x = y",
+            ))
+            fig_h.update_layout(height=650)
+            st.plotly_chart(fig_h, use_container_width=True)
+
+    # ---- Pitcher Breakout Board ----
+    st.subheader("Pitcher Breakout Board")
+    st.caption(
+        "Players below the line have ERAs inflated beyond what their stuff quality "
+        "suggests. Their xERA says they should be better. Buy candidates."
     )
 
-    fig.update_layout(height=650)
-    st.plotly_chart(fig, use_container_width=True)
+    bp = _load_parquet(SILVER / "statcast_pitchers.parquet")
+    if bp is not None:
+        required_p = {"xera", "era", "player_name", "team"}
+        if not required_p.issubset(bp.columns):
+            st.error(f"Missing pitcher columns. Need {required_p}, have {set(bp.columns)}")
+        else:
+            bp = _add_ownership(bp)
+
+            bp["label"] = bp["player_name"].str.split().str[-1] + " (" + bp["team"] + ")"
+
+            hover_fields_p = {
+                "player_name": True, "team": True,
+                "xera": ":.2f", "era": ":.2f",
+            }
+            if "xera_minus_era" in bp.columns:
+                hover_fields_p["xera_minus_era"] = ":.2f"
+            if "k_percent" in bp.columns:
+                hover_fields_p["k_percent"] = ":.1f"
+            if "barrel_percentile" in bp.columns:
+                hover_fields_p["barrel_percentile"] = ":.1f"
+
+            p_size_col = "hard_hit_percentile" if "hard_hit_percentile" in bp.columns else None
+            if p_size_col:
+                bp["_plot_size"] = bp[p_size_col]
+                bp.loc[bp["status"] == "FA", "_plot_size"] = bp.loc[bp["status"] == "FA", p_size_col] * 1.4
+                plot_size_p = "_plot_size"
+            else:
+                plot_size_p = None
+
+            category_order_p = ["FA"] + sorted(set(bp["status"].unique()) - {"FA"})
+
+            fig_p = px.scatter(
+                bp, x="xera", y="era",
+                color="status", color_discrete_map=color_map,
+                symbol="status", symbol_map=symbol_map,
+                size=plot_size_p, size_max=20,
+                hover_data=hover_fields_p,
+                labels={"xera": "xERA (Expected)", "era": "ERA (Actual)", "status": "Owner"},
+                title="xERA vs ERA",
+                category_orders={"status": category_order_p},
+            )
+            for trace in fig_p.data:
+                trace.opacity = opacity_map.get(trace.name, 0.6)
+
+            fa_pitchers = bp[bp["status"] == "FA"]
+            if not fa_pitchers.empty:
+                fig_p.add_trace(go.Scatter(
+                    x=fa_pitchers["xera"], y=fa_pitchers["era"] + 0.08,
+                    mode="text", text=fa_pitchers["label"], textposition="top center",
+                    textfont=dict(size=12, color="white"),
+                    showlegend=False, hoverinfo="skip",
+                ))
+
+            lo_p = min(bp["xera"].min(), bp["era"].min()) - 0.20
+            hi_p = max(bp["xera"].max(), bp["era"].max()) + 0.20
+            fig_p.add_trace(go.Scatter(
+                x=[lo_p, hi_p], y=[lo_p, hi_p], mode="lines",
+                line=dict(dash="dash", color="white", width=2),
+                showlegend=False, name="x = y",
+            ))
+            fig_p.update_layout(height=650)
+            st.plotly_chart(fig_p, use_container_width=True)
 
 
 def page_sp_streaming():
