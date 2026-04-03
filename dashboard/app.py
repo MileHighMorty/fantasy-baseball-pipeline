@@ -39,6 +39,15 @@ def _load_my_roster() -> set[str]:
     return set(df.loc[df["player_name"].notna(), "player_name"].str.strip())
 
 
+def _load_my_roster_df() -> pd.DataFrame | None:
+    """Return DataFrame of my Fantrax roster with player_name and position."""
+    df = _latest_fantrax("my_roster")
+    if df is None:
+        return None
+    df["player_name"] = df["player_name"].str.strip()
+    return df[["player_name", "position"]].rename(columns={"position": "fantrax_position"})
+
+
 def _load_all_rosters() -> pd.DataFrame | None:
     """Load all rosters and return DataFrame with team_name and player_name."""
     return _latest_fantrax("all_rosters")
@@ -131,6 +140,7 @@ def page_session_prep():
         "and regression is likely."
     )
     my_names = _load_my_roster()
+    my_roster_df = _load_my_roster_df()
     if not my_names:
         st.warning("Could not load my_roster CSV from Fantrax data.")
 
@@ -154,23 +164,73 @@ def page_session_prep():
             roster = roster[roster["player_name"].isin(my_names)]
             if roster.empty:
                 st.info("No statcast data found for your roster players yet.")
-        gap_col = "xwoba_minus_woba" if "xwoba_minus_woba" in roster.columns else "est_woba_minus_woba_diff"
-        display_cols = ["player_name", "team", "position", "player_type"]
-        if "woba" in roster.columns:
-            display_cols.append("woba")
-        if "est_woba" in roster.columns:
-            display_cols.append("est_woba")
-        if gap_col in roster.columns:
-            display_cols.append(gap_col)
-            styled = (
-                roster[display_cols]
-                .sort_values(gap_col, key=lambda s: s.abs(), ascending=False)
-                .style.map(_color_xwoba_gap, subset=[gap_col])
-                .format({c: "{:.3f}" for c in display_cols if c not in ("player_name", "team", "position", "player_type")})
-            )
-            st.dataframe(styled, use_container_width=True, hide_index=True)
-        else:
-            st.dataframe(roster[display_cols], use_container_width=True, hide_index=True)
+        # Merge Fantrax position data to replace statcast position
+        if my_roster_df is not None:
+            roster = roster.merge(my_roster_df, on="player_name", how="left")
+            roster["position"] = roster["fantrax_position"].fillna(roster.get("position", ""))
+            roster.drop(columns=["fantrax_position"], inplace=True)
+
+        # Position sort order for hitters
+        _POS_ORDER = {"C": 0, "1B": 1, "2B": 2, "3B": 3, "SS": 4, "OF": 5, "UT": 6}
+
+        hit_col, pit_col = st.columns(2)
+
+        # --- Hitters table (left) ---
+        with hit_col:
+            st.markdown("**Hitters**")
+            hit_df = roster[roster["player_type"] == "Hitter"].copy()
+            if not hit_df.empty:
+                gap_col = "xwoba_minus_woba" if "xwoba_minus_woba" in hit_df.columns else "est_woba_minus_woba_diff"
+                hit_df["_pos_rank"] = hit_df["position"].map(_POS_ORDER).fillna(99)
+                sort_cols = ["_pos_rank"]
+                sort_asc = [True]
+                if gap_col in hit_df.columns:
+                    sort_cols.append(gap_col)
+                    sort_asc.append(False)
+                hit_df = hit_df.sort_values(sort_cols, ascending=sort_asc).drop(columns=["_pos_rank"])
+
+                h_display = ["player_name", "team", "position"]
+                if "woba" in hit_df.columns:
+                    h_display.append("woba")
+                if "est_woba" in hit_df.columns:
+                    h_display.append("est_woba")
+                if gap_col in hit_df.columns:
+                    h_display.append(gap_col)
+
+                fmt = {c: "{:.3f}" for c in h_display if c not in ("player_name", "team", "position")}
+                styled_h = hit_df[h_display].style.format(fmt)
+                if gap_col in hit_df.columns:
+                    styled_h = styled_h.map(_color_xwoba_gap, subset=[gap_col])
+                st.dataframe(styled_h, use_container_width=True, hide_index=True,
+                             height=max(400, 35 * len(hit_df) + 40))
+            else:
+                st.info("No hitter statcast data available.")
+
+        # --- Pitchers table (right) ---
+        with pit_col:
+            st.markdown("**Pitchers**")
+            pit_df = roster[roster["player_type"] == "Pitcher"].copy()
+            if not pit_df.empty:
+                era_gap = "xera_minus_era" if "xera_minus_era" in pit_df.columns else None
+                if era_gap and era_gap in pit_df.columns:
+                    pit_df = pit_df.sort_values(era_gap, ascending=False)
+
+                p_display = ["player_name", "team", "position"]
+                if "xera" in pit_df.columns:
+                    p_display.append("xera")
+                if "era" in pit_df.columns:
+                    p_display.append("era")
+                if era_gap and era_gap in pit_df.columns:
+                    p_display.append(era_gap)
+
+                fmt = {c: "{:.2f}" for c in p_display if c not in ("player_name", "team", "position")}
+                styled_p = pit_df[p_display].style.format(fmt)
+                if era_gap and era_gap in pit_df.columns:
+                    styled_p = styled_p.map(_color_xwoba_gap, subset=[era_gap])
+                st.dataframe(styled_p, use_container_width=True, hide_index=True,
+                             height=max(400, 35 * len(pit_df) + 40))
+            else:
+                st.info("No pitcher statcast data available.")
 
     # --- Breakout adds (free agents only) ---
     col1, col2 = st.columns(2)
@@ -230,15 +290,23 @@ def page_breakout_board():
     if size_col is None and "avg_hit_speed" in bh.columns:
         size_col = "avg_hit_speed"
 
+    # Extract last names for FA text labels
+    bh["last_name"] = bh["player_name"].str.split().str[-1]
+
+    # Build hover tooltip fields
     hover_fields = {
         "player_name": True,
         "team": True,
+        "position": True,
         "ownership": True,
     }
-    if "hard_hit_percent" in bh.columns:
-        hover_fields["hard_hit_percent"] = ":.1f"
-    if "brl_percent" in bh.columns:
-        hover_fields["brl_percent"] = ":.1f"
+    for hf in ["xwoba_minus_woba", "hard_hit_percent", "brl_percent"]:
+        if hf in bh.columns:
+            hover_fields[hf] = ":.3f" if "woba" in hf else ":.1f"
+    if "barrel_batted_rate" not in bh.columns and "brl_percent" in bh.columns:
+        bh["barrel_batted_rate"] = bh["brl_percent"]
+    if "barrel_batted_rate" in bh.columns:
+        hover_fields["barrel_batted_rate"] = ":.1f"
 
     # FA = bright blue circle, My Team = green star, Owned = faded gray diamond
     color_map = {MY_TEAM: "#2ecc71", "FA": "#3498db", "Owned": "#adb5bd"}
@@ -264,6 +332,22 @@ def page_breakout_board():
     # Set opacity per trace so owned players fade into the background
     for trace in fig.data:
         trace.opacity = opacity_map.get(trace.name, 0.6)
+
+    # Add visible text labels (last name) on FA dots only
+    fa_data = bh[bh["status"] == "FA"]
+    if not fa_data.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=fa_data["est_woba"],
+                y=fa_data["woba"],
+                mode="text",
+                text=fa_data["last_name"],
+                textposition="top center",
+                textfont=dict(size=9, color="#3498db"),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
 
     # Diagonal x=y line
     lo = min(bh["est_woba"].min(), bh["woba"].min()) - 0.010
@@ -361,6 +445,84 @@ def page_regression_watch():
                 st.plotly_chart(fig, use_container_width=True)
 
 
+def _ownership_color(val):
+    """Styler function for prospect ownership column."""
+    if val == "FA":
+        return "background-color: #69db7c; color: black"
+    if val == MY_TEAM:
+        return "background-color: #ffd43b; color: black"
+    return "background-color: #dee2e6; color: black"
+
+
+def _upgrade_color(val):
+    """Styler function for net upgrade score — green > 15, yellow 10-15."""
+    try:
+        v = float(val)
+    except (ValueError, TypeError):
+        return ""
+    if v > 15:
+        return "background-color: #69db7c"
+    if v >= 10:
+        return "background-color: #ffd43b"
+    return ""
+
+
+def page_add_drop():
+    st.header("Suggested Roster Moves")
+    st.caption(
+        "These suggestions compare your weakest rostered player at each position "
+        "against the best available free agent. A swap is suggested when the FA's "
+        "underlying Statcast metrics significantly exceed your current player. "
+        "Dynasty warnings flag young players who should be traded rather than dropped."
+    )
+
+    suggestions = _load_csv(GOLD / "add_drop_suggestions.csv")
+    if suggestions is None:
+        return
+    if suggestions.empty:
+        st.success("No suggested moves — your roster is solid at every position.")
+        return
+
+    # Filter out sub-threshold rows (keep net_upgrade >= 10)
+    suggestions = suggestions[suggestions["net_upgrade"] >= 10].copy()
+    if suggestions.empty:
+        st.success("No significant upgrades available right now.")
+        return
+
+    display_cols = [
+        "position",
+        "drop_candidate",
+        "drop_score",
+        "add_candidate",
+        "add_score",
+        "net_upgrade",
+        "dynasty_warning",
+    ]
+    available = [c for c in display_cols if c in suggestions.columns]
+    display_df = suggestions[available].rename(columns={
+        "position": "Position",
+        "drop_candidate": "Drop",
+        "drop_score": "Drop Score",
+        "add_candidate": "Add",
+        "add_score": "Add Score",
+        "net_upgrade": "Net Upgrade",
+        "dynasty_warning": "Dynasty Warning",
+    })
+
+    fmt = {"Drop Score": "{:.1f}", "Add Score": "{:.1f}", "Net Upgrade": "{:.1f}"}
+    styled = display_df.style.format(fmt, na_rep="—")
+    styled = styled.map(_upgrade_color, subset=["Net Upgrade"])
+
+    st.dataframe(styled, use_container_width=True, hide_index=True,
+                 height=max(400, 35 * len(display_df) + 40))
+
+    st.caption(
+        "These are data-driven suggestions, not automatic decisions. "
+        "Always consider lineup context, team quality, and upcoming schedule "
+        "before making moves."
+    )
+
+
 def page_prospect_pipeline():
     st.header("Prospect Pipeline")
     st.caption(
@@ -374,17 +536,92 @@ def page_prospect_pipeline():
     if prospects is None:
         return
 
+    # FA filter toggle
+    show_fa_only = st.checkbox("Show FAs only", value=False)
+    if show_fa_only and "ownership" in prospects.columns:
+        prospects = prospects[prospects["ownership"] == "FA"]
+
+    if prospects.empty:
+        st.info("No prospects match the current filter.")
+        return
+
+    # Add hot indicator column
+    if "is_hot" in prospects.columns:
+        prospects["hot"] = prospects["is_hot"].apply(
+            lambda x: "\U0001f525" if x in (True, "True", "true", 1, "1") else ""
+        )
+
+    # Mark prospects without stats
+    if "has_stats" in prospects.columns:
+        no_stats = prospects["has_stats"].apply(
+            lambda x: x in (False, "False", "false", 0, "0")
+        )
+        for col in ["avg", "obp", "slg", "era", "whip", "k_per_9"]:
+            if col in prospects.columns:
+                prospects.loc[no_stats, col] = None
+
+    # Build display columns
+    display_cols = ["hot"] if "hot" in prospects.columns else []
+    display_cols += ["name", "team", "position", "level"]
+    if "age" in prospects.columns:
+        display_cols.append("age")
+    display_cols.append("ownership")
+
+    # Add stat columns
+    for c in ["avg", "obp", "slg", "k_pct", "bb_pct", "hr",
+              "era", "whip", "k_per_9", "bb_per_9", "ip"]:
+        if c in prospects.columns and prospects[c].notna().any():
+            display_cols.append(c)
+
+    for c in ["on_40_man", "callup_candidate", "heat_score"]:
+        if c in prospects.columns:
+            display_cols.append(c)
+
+    available = [c for c in display_cols if c in prospects.columns]
+    display_df = prospects[available].copy()
+
+    # Format numeric columns
+    fmt = {}
+    for c in ["avg", "obp", "slg"]:
+        if c in display_df.columns:
+            fmt[c] = "{:.3f}"
+    for c in ["era", "whip", "k_per_9", "bb_per_9", "ip", "heat_score"]:
+        if c in display_df.columns:
+            fmt[c] = "{:.1f}"
+
+    # Apply styling
+    styled = display_df.style.format(fmt, na_rep="—")
+
+    if "ownership" in display_df.columns:
+        styled = styled.map(_ownership_color, subset=["ownership"])
+
+    # Highlight hot prospects
+    if "is_hot" in prospects.columns:
+        def _highlight_hot(row):
+            is_hot_val = prospects.iloc[row.name].get("is_hot", False) if row.name < len(prospects) else False
+            if is_hot_val in (True, "True", "true", 1, "1"):
+                return ["background-color: #fff3e0"] * len(row)
+            return [""] * len(row)
+        # Only apply row highlight if hot column exists
+        hot_mask = prospects["is_hot"].apply(lambda x: x in (True, "True", "true", 1, "1"))
+        if hot_mask.any():
+            def _hot_row_style(row):
+                idx = row.name
+                if idx in hot_mask.index and hot_mask.loc[idx]:
+                    return ["background-color: #fff3e0"] * len(row)
+                return [""] * len(row)
+            styled = styled.apply(_hot_row_style, axis=1)
+
     # Highlight call-up candidates
-    if "callup_candidate" in prospects.columns:
+    if "callup_candidate" in display_df.columns:
         def _highlight_callup(row):
             if row.get("callup_candidate") in (True, "True", "true", 1, "1", "Yes", "yes"):
                 return ["background-color: #a9e34b"] * len(row)
             return [""] * len(row)
+        styled = styled.apply(_highlight_callup, axis=1)
 
-        styled = prospects.style.apply(_highlight_callup, axis=1)
-        st.dataframe(styled, use_container_width=True, hide_index=True)
-    else:
-        st.dataframe(prospects, use_container_width=True, hide_index=True)
+    st.dataframe(styled, use_container_width=True, hide_index=True,
+                 height=max(500, 35 * len(display_df) + 40))
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +633,7 @@ PAGES = {
     "Breakout Board": page_breakout_board,
     "SP Streaming": page_sp_streaming,
     "Regression Watch": page_regression_watch,
+    "Add/Drop Suggestions": page_add_drop,
     "Prospect Pipeline": page_prospect_pipeline,
 }
 

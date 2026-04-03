@@ -1,14 +1,186 @@
 prospects:
-  - name: Sebastian Walcott
-    player_id: 808989
-    team: TEX
-    position: SS
-    level: Double-A
-    notes: ""
+  # ── Hitters ─────────────────────────────────────────────────────────
+  - name: Roman Anthony
+    player_id: 700218
+    team: BOS
+    position: OF
+    level: Triple-A
+    age: 21
+    notes: "Top overall prospect"
 
   - name: Jackson Holliday
     player_id: 695370
     team: BAL
     position: 2B
     level: Triple-A
+    age: 22
+    notes: "Former #1 overall pick"
+
+  - name: James Wood
+    player_id: 694460
+    team: WSH
+    position: OF
+    level: Triple-A
+    age: 23
     notes: ""
+
+  - name: Marcelo Mayer
+    player_id: 694558
+    team: BOS
+    position: SS
+    level: Triple-A
+    age: 23
+    notes: ""
+
+  - name: Bryce Eldridge
+    player_id: 700364
+    team: SF
+    position: 1B/OF
+    level: Double-A
+    age: 20
+    notes: "Two-way talent, focusing on hitting"
+
+  - name: Coby Mayo
+    player_id: 694577
+    team: BAL
+    position: 3B
+    level: Triple-A
+    age: 23
+    notes: ""
+
+  - name: Sebastian Walcott
+    player_id: 808989
+    team: TEX
+    position: SS
+    level: Double-A
+    age: 19
+    notes: ""
+
+  - name: Kristian Campbell
+    player_id: 700213
+    team: BOS
+    position: 2B/SS
+    level: Triple-A
+    age: 23
+    notes: ""
+
+  - name: Chase DeLauter
+    player_id: 700195
+    team: CLE
+    position: OF
+    level: Double-A
+    age: 24
+    notes: ""
+
+  - name: Justin Crawford
+    player_id: 700202
+    team: PHI
+    position: OF
+    level: Double-A
+    age: 21
+    notes: "Elite speed"
+
+  - name: Caleb Durbin
+    player_id: 702332
+    team: BOS
+    position: 2B
+    level: Triple-A
+    age: 26
+    notes: ""
+
+  - name: Cole Young
+    player_id: 700208
+    team: SEA
+    position: SS
+    level: Double-A
+    age: 22
+    notes: ""
+
+  - name: Jac Caglianone
+    player_id: 701044
+    team: KC
+    position: 1B/DH
+    level: High-A
+    age: 22
+    notes: "Two-way college star, massive power"
+
+  - name: Kevin McGonigle
+    player_id: 701388
+    team: DET
+    position: SS
+    level: High-A
+    age: 21
+    notes: ""
+
+  - name: Carson Benge
+    player_id: 700646
+    team: NYM
+    position: OF
+    level: Double-A
+    age: 23
+    notes: ""
+
+  - name: Daylen Lile
+    player_id: 700247
+    team: WSH
+    position: OF
+    level: High-A
+    age: 22
+    notes: ""
+
+  # ── Pitchers ────────────────────────────────────────────────────────
+  - name: Roki Sasaki
+    player_id: 808967
+    team: LAD
+    position: SP
+    level: MLB
+    age: 23
+    notes: "Former NPB star"
+
+  - name: Andrew Painter
+    player_id: 694644
+    team: PHI
+    position: SP
+    level: Triple-A
+    age: 22
+    notes: "Returning from injury"
+
+  - name: Bubba Chandler
+    player_id: 700191
+    team: PIT
+    position: SP
+    level: Double-A
+    age: 22
+    notes: "Two-way talent pitching full-time"
+
+  - name: Hurston Waldrep
+    player_id: 700325
+    team: ATL
+    position: SP
+    level: Triple-A
+    age: 24
+    notes: ""
+
+  - name: Blade Tidwell
+    player_id: 700287
+    team: SF
+    position: SP
+    level: Double-A
+    age: 24
+    notes: ""
+
+  - name: Shane Smith
+    player_id: 700790
+    team: CWS
+    position: SP
+    level: High-A
+    age: 21
+    notes: ""
+
+  - name: AJ Vukovich
+    player_id: 700319
+    team: AZ
+    position: OF/3B
+    level: Triple-A
+    age: 23
+    notes: "Power bat, position flexibility"

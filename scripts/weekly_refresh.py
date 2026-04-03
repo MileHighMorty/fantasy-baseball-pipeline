@@ -106,6 +106,7 @@ def run_gold() -> dict[str, bool]:
         ("Waiver Ranker", "gold.waiver_ranker"),
         ("SP Streamer", "gold.sp_streamer"),
         ("Prospect Watch", "gold.prospect_watch"),
+        ("Add/Drop Engine", "gold.add_drop_engine"),
     ]
     results = {}
     for name, path in modules:
@@ -202,6 +203,7 @@ def print_gold_summary(results: dict[str, bool]) -> None:
     )
     streamer_count = _count_csv_rows(GOLD_DATA / "sp_streaming_picks.csv")
     prospect_count = _count_csv_rows(GOLD_DATA / "prospect_alerts.csv")
+    add_drop_count = _count_csv_rows(GOLD_DATA / "add_drop_suggestions.csv")
 
     failed = [name for name, ok in results.items() if not ok]
 
@@ -214,7 +216,8 @@ def print_gold_summary(results: dict[str, bool]) -> None:
     print(
         f"  Waiver targets: {waiver_count}  |  "
         f"SP streamers: {streamer_count}  |  "
-        f"Prospect alerts: {prospect_count}"
+        f"Prospect alerts: {prospect_count}  |  "
+        f"Add/drop suggestions: {add_drop_count}"
     )
     if failed:
         print(f"  FAILED: {', '.join(failed)}")

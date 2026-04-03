@@ -23,8 +23,11 @@ import yaml
 # ── paths ────────────────────────────────────────────────────────────
 
 BRONZE_MILB = pathlib.Path(__file__).resolve().parent.parent / "bronze" / "data" / "milb"
+BRONZE_FANTRAX = pathlib.Path(__file__).resolve().parent.parent / "bronze" / "data" / "fantrax"
 CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 GOLD_DIR = pathlib.Path(__file__).resolve().parent / "data"
+
+MY_TEAM = "Rutsch Hour"
 
 # ── level hierarchy (higher number = closer to majors) ───────────────
 
@@ -127,6 +130,18 @@ def load_milb_pitching(today: str) -> pd.DataFrame | None:
         return pd.read_csv(candidates[0])
 
     return None
+
+
+def load_all_rosters() -> pd.DataFrame | None:
+    """Load the most recent all_rosters CSV from Fantrax bronze data.
+
+    Returns:
+        DataFrame with team_name and player_name columns, or None.
+    """
+    files = sorted(BRONZE_FANTRAX.glob("all_rosters_*.csv"))
+    if not files:
+        return None
+    return pd.read_csv(files[-1])
 
 
 def load_40_man_roster(team_abbrev: str) -> set[int]:
@@ -297,16 +312,81 @@ def flag_callup_pitcher(row: pd.Series) -> bool:
 # ── assembly ─────────────────────────────────────────────────────────
 
 
+def _lookup_ownership(player_name: str, all_rosters: pd.DataFrame | None) -> str:
+    """Return fantasy ownership status for a prospect.
+
+    Returns MY_TEAM name, other owner's team name, or 'FA'.
+    """
+    if all_rosters is None:
+        return "FA"
+    match = all_rosters.loc[
+        all_rosters["player_name"].str.strip().str.lower() == player_name.strip().lower()
+    ]
+    if match.empty:
+        return "FA"
+    owner = match.iloc[0]["team_name"]
+    return owner if owner else "FA"
+
+
+def _calc_heat_score(row: dict) -> float:
+    """Calculate a heat score for a prospect based on available stats.
+
+    Hitters: HOT if AVG > .300 and OBP > .380
+    Pitchers: HOT if ERA < 3.00 and K/9 > 9.0
+    Returns a numeric score (0-100) for sorting.
+    """
+    ptype = row.get("player_type", "unknown")
+    if ptype == "hitter" or ptype == "two-way":
+        avg = row.get("avg")
+        obp = row.get("obp")
+        if avg is not None and obp is not None and avg > 0:
+            score = 0.0
+            score += min(avg / 0.300, 1.5) * 40  # AVG contribution
+            score += min(obp / 0.380, 1.5) * 30  # OBP contribution
+            slg = row.get("slg")
+            if slg is not None and slg > 0:
+                score += min(slg / 0.500, 1.5) * 30
+            return round(score, 1)
+    if ptype == "pitcher" or ptype == "two-way":
+        era = row.get("era")
+        k9 = row.get("k_per_9")
+        if era is not None and k9 is not None:
+            era_score = max(0, (5.0 - era) / 5.0) * 50
+            k_score = min(k9 / 12.0, 1.5) * 50
+            return round(era_score + k_score, 1)
+    return 0.0
+
+
+def _is_hot(row: dict) -> bool:
+    """Check if a prospect qualifies as HOT based on stat thresholds."""
+    ptype = row.get("player_type", "unknown")
+    if ptype in ("hitter", "two-way"):
+        avg = row.get("avg")
+        obp = row.get("obp")
+        if avg is not None and obp is not None:
+            if avg > 0.300 and obp > 0.380:
+                return True
+    if ptype in ("pitcher", "two-way"):
+        era = row.get("era")
+        k9 = row.get("k_per_9")
+        if era is not None and k9 is not None:
+            if era < 3.00 and k9 > 9.0:
+                return True
+    return False
+
+
 def build_prospect_table(
     watchlist: list[dict],
     batting: pd.DataFrame | None,
     pitching: pd.DataFrame | None,
     roster_cache: dict[str, set[int]],
+    all_rosters: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build a unified prospect alert table from all available data sources.
 
-    Merges watchlist metadata with aggregated MiLB stats and 40-man
-    roster status into a single DataFrame ready for display and export.
+    Merges watchlist metadata with aggregated MiLB stats, 40-man
+    roster status, fantasy ownership, and heat scores into a single
+    DataFrame ready for display and export.
 
     Args:
         watchlist: List of prospect dicts from the YAML watchlist.
@@ -314,6 +394,7 @@ def build_prospect_table(
         pitching: Aggregated pitching stats, or None if unavailable.
         roster_cache: Dict mapping team abbreviation to set of 40-man
             roster player IDs.
+        all_rosters: Fantrax all_rosters DataFrame for ownership lookup.
 
     Returns:
         DataFrame with one row per tracked prospect and all available
@@ -328,10 +409,12 @@ def build_prospect_table(
             "team": team,
             "position": prospect.get("position", ""),
             "level": prospect.get("level", ""),
+            "age": prospect.get("age", ""),
             "notes": prospect.get("notes", ""),
             "on_40_man": pid in roster_cache.get(team, set()),
             "callup_candidate": False,
             "player_type": "unknown",
+            "has_stats": False,
         }
 
         # Merge batting stats
@@ -347,6 +430,7 @@ def build_prospect_table(
             row["hr"] = int(b.get("hr", 0))
             row["player_type"] = "hitter"
             row["callup_candidate"] = flag_callup_hitter(b)
+            row["has_stats"] = True
 
         # Merge pitching stats
         if pitching is not None and pid in pitching["player_id"].values:
@@ -363,10 +447,22 @@ def build_prospect_table(
             else:
                 row["player_type"] = "pitcher"
                 row["callup_candidate"] = flag_callup_pitcher(p)
+            row["has_stats"] = True
+
+        # Ownership from Fantrax
+        row["ownership"] = _lookup_ownership(prospect["name"], all_rosters)
+
+        # Heat score
+        row["heat_score"] = _calc_heat_score(row)
+        row["is_hot"] = _is_hot(row)
 
         rows.append(row)
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    # Sort by heat_score descending so hottest prospects are at top
+    if "heat_score" in df.columns:
+        df = df.sort_values("heat_score", ascending=False).reset_index(drop=True)
+    return df
 
 
 # ── display ──────────────────────────────────────────────────────────
@@ -458,9 +554,18 @@ def main() -> None:
             print(f"  {team}: roster unavailable")
     print()
 
+    # Load Fantrax all_rosters for ownership lookup
+    print("Loading Fantrax rosters for ownership lookup...")
+    all_rosters = load_all_rosters()
+    if all_rosters is not None:
+        print(f"  {len(all_rosters)} roster entries loaded")
+    else:
+        print("  No Fantrax roster data available")
+    print()
+
     # Build unified prospect table
     print("Building prospect alerts...")
-    alerts = build_prospect_table(watchlist, batting, pitching, roster_cache)
+    alerts = build_prospect_table(watchlist, batting, pitching, roster_cache, all_rosters)
 
     callup_count = alerts["callup_candidate"].sum()
     print(f"  {len(alerts)} prospects evaluated, {callup_count} call-up candidate(s)\n")
