@@ -281,37 +281,61 @@ def page_breakout_board():
     if "ownership" not in bh.columns:
         bh["ownership"] = "Unknown"
 
-    # Simplify ownership for display: MY_TEAM, FA, or "Owned"
-    bh["status"] = bh["ownership"].apply(
-        lambda o: MY_TEAM if o == MY_TEAM else ("FA" if o == "FA" else "Owned")
-    )
+    # Use actual team names for the legend (FA stays as-is)
+    bh["status"] = bh["ownership"]
 
-    size_col = "hard_hit_percent" if "hard_hit_percent" in bh.columns else None
+    size_col = "hard_hit_percentile" if "hard_hit_percentile" in bh.columns else None
     if size_col is None and "avg_hit_speed" in bh.columns:
         size_col = "avg_hit_speed"
 
-    # Extract last names for FA text labels
-    bh["last_name"] = bh["player_name"].str.split().str[-1]
+    # Extract last name + team abbreviation for FA text labels
+    bh["label"] = bh["player_name"].str.split().str[-1] + " (" + bh["team"] + ")"
 
-    # Build hover tooltip fields
+    # Build hover tooltip fields using actual column names
     hover_fields = {
         "player_name": True,
         "team": True,
         "position": True,
-        "ownership": True,
+        "est_woba": ":.3f",
+        "woba": ":.3f",
     }
-    for hf in ["xwoba_minus_woba", "hard_hit_percent", "brl_percent"]:
+    for hf in ["xwoba_minus_woba", "est_woba_minus_woba_diff"]:
         if hf in bh.columns:
-            hover_fields[hf] = ":.3f" if "woba" in hf else ":.1f"
-    if "barrel_batted_rate" not in bh.columns and "brl_percent" in bh.columns:
-        bh["barrel_batted_rate"] = bh["brl_percent"]
-    if "barrel_batted_rate" in bh.columns:
-        hover_fields["barrel_batted_rate"] = ":.1f"
+            hover_fields[hf] = ":.3f"
+            break
+    if "hard_hit_percentile" in bh.columns:
+        hover_fields["hard_hit_percentile"] = ":.1f"
+    if "brl_percent" in bh.columns:
+        hover_fields["brl_percent"] = ":.1f"
 
-    # FA = bright blue circle, My Team = green star, Owned = faded gray diamond
-    color_map = {MY_TEAM: "#2ecc71", "FA": "#3498db", "Owned": "#adb5bd"}
-    symbol_map = {MY_TEAM: "star", "FA": "circle", "Owned": "diamond"}
-    opacity_map = {MY_TEAM: 1.0, "FA": 1.0, "Owned": 0.4}
+    # Build color/symbol/opacity maps for all 12 teams + FA
+    _LEAGUE_TEAMS = [
+        "Ben", "Chad", "George", "J-Rod Show", "Jorp", "Luke",
+        "Mullets", "Negs", "One Pathetic Luzar", "Porter",
+        "Professor McGonigle", "Rutsch Hour",
+    ]
+    # Owned team palette (distinct colors for each team)
+    _TEAM_COLORS = [
+        "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c", "#3498db",
+        "#9b59b6", "#e84393", "#fd79a8", "#00cec9", "#6c5ce7", "#ffeaa7",
+    ]
+    color_map = {"FA": "#3498db"}
+    symbol_map = {"FA": "circle"}
+    opacity_map = {"FA": 1.0}
+    for i, team in enumerate(_LEAGUE_TEAMS):
+        color_map[team] = _TEAM_COLORS[i]
+        symbol_map[team] = "star" if team == MY_TEAM else "diamond"
+        opacity_map[team] = 1.0 if team == MY_TEAM else 0.4
+
+    # Ensure FA dots are larger by adding a size boost column
+    if size_col:
+        bh["_plot_size"] = bh[size_col]
+        bh.loc[bh["status"] == "FA", "_plot_size"] = bh.loc[bh["status"] == "FA", size_col] * 1.4
+        plot_size_col = "_plot_size"
+    else:
+        plot_size_col = None
+
+    category_order = ["FA"] + sorted(set(bh["status"].unique()) - {"FA"})
 
     fig = px.scatter(
         bh,
@@ -321,42 +345,42 @@ def page_breakout_board():
         color_discrete_map=color_map,
         symbol="status",
         symbol_map=symbol_map,
-        size=size_col,
-        size_max=18,
+        size=plot_size_col,
+        size_max=20,
         hover_data=hover_fields,
-        labels={"est_woba": "xwOBA (Expected)", "woba": "wOBA (Actual)", "status": "Status"},
+        labels={"est_woba": "xwOBA (Expected)", "woba": "wOBA (Actual)", "status": "Owner"},
         title="xwOBA vs wOBA — Players Above the Line Are Underperforming (Buy Candidates)",
-        category_orders={"status": ["FA", MY_TEAM, "Owned"]},
+        category_orders={"status": category_order},
     )
 
     # Set opacity per trace so owned players fade into the background
     for trace in fig.data:
         trace.opacity = opacity_map.get(trace.name, 0.6)
 
-    # Add visible text labels (last name) on FA dots only
+    # Add visible text labels (last name + team) on FA dots only
     fa_data = bh[bh["status"] == "FA"]
     if not fa_data.empty:
         fig.add_trace(
             go.Scatter(
                 x=fa_data["est_woba"],
-                y=fa_data["woba"],
+                y=fa_data["woba"] + 0.004,
                 mode="text",
-                text=fa_data["last_name"],
+                text=fa_data["label"],
                 textposition="top center",
-                textfont=dict(size=9, color="#3498db"),
+                textfont=dict(size=12, color="white"),
                 showlegend=False,
                 hoverinfo="skip",
             )
         )
 
-    # Diagonal x=y line
+    # Diagonal x=y line — white dashed for visibility on dark background
     lo = min(bh["est_woba"].min(), bh["woba"].min()) - 0.010
     hi = max(bh["est_woba"].max(), bh["woba"].max()) + 0.010
     fig.add_trace(
         go.Scatter(
             x=[lo, hi], y=[lo, hi],
             mode="lines",
-            line=dict(dash="dash", color="gray"),
+            line=dict(dash="dash", color="white", width=2),
             showlegend=False,
             name="x = y",
         )
