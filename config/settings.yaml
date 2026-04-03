@@ -1,0 +1,42 @@
+league:
+  name: "Dynasty League"
+  platform: fantrax
+  teams: 12
+  format: dynasty
+  scoring: h2h_categories
+  roster:
+    C: 1
+    1B: 1
+    2B: 1
+    3B: 1
+    SS: 1
+    OF: 5
+    UTIL: 2
+    SP: 5
+    RP: 3
+    BN: 5
+    IL: 3
+    MiLB: 5
+  hitting_categories:
+    - R
+    - HR
+    - RBI
+    - SB
+    - AVG
+    - OPS
+  pitching_categories:
+    - W
+    - SV
+    - K
+    - ERA
+    - WHIP
+    - QS
+
+data:
+  bronze_path: bronze/data
+  silver_path: silver/data
+  gold_path: gold/data
+
+refresh:
+  daily_hour: 6
+  weekly_day: Monday

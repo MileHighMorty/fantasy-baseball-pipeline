@@ -1,0 +1,12 @@
+fantraxapi
+pybaseball
+pandas
+pyarrow
+requests
+pyyaml
+python-dotenv
+streamlit
+duckdb
+beautifulsoup4
+lxml
+rapidfuzz

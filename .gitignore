@@ -1,0 +1,9 @@
+venv/
+.env
+bronze/data/
+silver/data/
+gold/data/
+*.duckdb
+__pycache__/
+*.pyc
+fantraxloggedin.cookie
