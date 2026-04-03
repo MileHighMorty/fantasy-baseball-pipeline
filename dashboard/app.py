@@ -121,6 +121,15 @@ def page_session_prep():
 
     # --- My Roster Health ---
     st.subheader("My Roster Health")
+    st.caption(
+        "xwOBA minus wOBA measures the gap between a player's expected production "
+        "(based on exit velocity, launch angle, and sprint speed) and their actual results. "
+        "Green (within 0.020) means performing as expected. "
+        "Yellow (gap > 0.020) means slight over/underperformance. "
+        "Red (gap > 0.050) means significant divergence — positive red means the player "
+        "is unlucky and due for better results, negative red means they're getting lucky "
+        "and regression is likely."
+    )
     my_names = _load_my_roster()
     if not my_names:
         st.warning("Could not load my_roster CSV from Fantrax data.")
@@ -163,18 +172,26 @@ def page_session_prep():
         else:
             st.dataframe(roster[display_cols], use_container_width=True, hide_index=True)
 
-    # --- Breakout adds ---
+    # --- Breakout adds (free agents only) ---
     col1, col2 = st.columns(2)
+    breakout_caption = (
+        "These are free agents whose underlying Statcast quality significantly exceeds "
+        "their surface stats. They are hitting the ball hard but not getting results yet "
+        "— the process is right, the outcomes haven't caught up. These are buy-low "
+        "candidates before the market notices."
+    )
     with col1:
         st.subheader("Top 10 Breakout Hitter Adds")
-        bh = _load_csv(GOLD / "breakout_hitters.csv")
+        st.caption(breakout_caption)
+        bh = _load_csv(GOLD / "breakout_hitters_fa.csv")
         if bh is not None:
             show_cols = [c for c in ["player_name", "team", "position", "est_woba", "woba", "xwoba_minus_woba", "hard_hit_percentile", "barrel_percentile"] if c in bh.columns]
             st.dataframe(bh[show_cols].head(10), use_container_width=True, hide_index=True)
 
     with col2:
         st.subheader("Top 10 Breakout Pitcher Adds")
-        bp = _load_csv(GOLD / "breakout_pitchers.csv")
+        st.caption(breakout_caption)
+        bp = _load_csv(GOLD / "breakout_pitchers_fa.csv")
         if bp is not None:
             show_cols = [c for c in ["player_name", "team", "position", "xera", "era", "xera_minus_era", "k_percent", "barrel_percentile"] if c in bp.columns]
             st.dataframe(bp[show_cols].head(10), use_container_width=True, hide_index=True)
@@ -183,7 +200,15 @@ def page_session_prep():
 def page_breakout_board():
     st.header("Breakout Board")
 
-    bh = _load_csv(GOLD / "breakout_hitters.csv")
+    st.caption(
+        "Players above the diagonal line have actual wOBA lower than their expected wOBA "
+        "— meaning their underlying contact quality is better than their results show. "
+        "These are buy candidates. Players below the line are overperforming their Statcast "
+        "profile and may regress. Dot size reflects hard-hit percentage. Hover over any dot "
+        "for the full profile."
+    )
+
+    bh = _load_csv(GOLD / "breakout_hitters_all.csv")
     if bh is None:
         return
 
@@ -192,18 +217,16 @@ def page_breakout_board():
         st.error(f"Missing columns. Need {required}, have {set(bh.columns)}")
         return
 
-    # --- Add ownership status column ---
-    my_names = _load_my_roster()
-    all_rosters = _load_all_rosters()
-    if all_rosters is not None and my_names:
-        bh["ownership"] = bh["player_name"].apply(
-            lambda n: _ownership_status(n, all_rosters, my_names)
-        )
-    else:
+    # Ownership comes pre-tagged from breakout_detector
+    if "ownership" not in bh.columns:
         bh["ownership"] = "Unknown"
 
+    # Simplify ownership for display: MY_TEAM, FA, or "Owned"
+    bh["status"] = bh["ownership"].apply(
+        lambda o: MY_TEAM if o == MY_TEAM else ("FA" if o == "FA" else "Owned")
+    )
+
     size_col = "hard_hit_percent" if "hard_hit_percent" in bh.columns else None
-    # Fallback: some datasets name it differently
     if size_col is None and "avg_hit_speed" in bh.columns:
         size_col = "avg_hit_speed"
 
@@ -217,22 +240,30 @@ def page_breakout_board():
     if "brl_percent" in bh.columns:
         hover_fields["brl_percent"] = ":.1f"
 
-    # Color by ownership: My Team = green, FA = blue, other teams = gray
-    color_map = {MY_TEAM: "#2ecc71", "FA": "#3498db"}
+    # FA = bright blue circle, My Team = green star, Owned = faded gray diamond
+    color_map = {MY_TEAM: "#2ecc71", "FA": "#3498db", "Owned": "#adb5bd"}
+    symbol_map = {MY_TEAM: "star", "FA": "circle", "Owned": "diamond"}
+    opacity_map = {MY_TEAM: 1.0, "FA": 1.0, "Owned": 0.4}
+
     fig = px.scatter(
         bh,
         x="est_woba",
         y="woba",
-        color="ownership",
+        color="status",
         color_discrete_map=color_map,
-        symbol="ownership",
-        symbol_map={MY_TEAM: "star", "FA": "circle"},
+        symbol="status",
+        symbol_map=symbol_map,
         size=size_col,
         size_max=18,
         hover_data=hover_fields,
-        labels={"est_woba": "xwOBA (Expected)", "woba": "wOBA (Actual)", "ownership": "Ownership"},
+        labels={"est_woba": "xwOBA (Expected)", "woba": "wOBA (Actual)", "status": "Status"},
         title="xwOBA vs wOBA — Players Above the Line Are Underperforming (Buy Candidates)",
+        category_orders={"status": ["FA", MY_TEAM, "Owned"]},
     )
+
+    # Set opacity per trace so owned players fade into the background
+    for trace in fig.data:
+        trace.opacity = opacity_map.get(trace.name, 0.6)
 
     # Diagonal x=y line
     lo = min(bh["est_woba"].min(), bh["woba"].min()) - 0.010
@@ -253,6 +284,12 @@ def page_breakout_board():
 
 def page_sp_streaming():
     st.header("SP Streaming Picks")
+    st.caption(
+        "Starting pitchers ranked by streaming value for this week. Score is weighted: "
+        "40% pitcher xERA (lower is better), 30% strikeout rate (higher is better), "
+        "30% opponent weakness (low wRC+ and high K% is better). Green scores are "
+        "high-confidence streams, yellow are matchup-dependent, red are risky."
+    )
 
     sp = _load_csv(GOLD / "sp_streaming_picks.csv")
     if sp is None:
@@ -276,6 +313,12 @@ def page_regression_watch():
 
     with col1:
         st.subheader("Hitters")
+        st.caption(
+            "These players have actual results significantly better than their underlying "
+            "Statcast metrics suggest. A large negative xwOBA gap means their batting average, "
+            "home runs, or OBP are inflated by luck (high BABIP, unsustainable HR/FB rate). "
+            "Consider selling high in trades before regression hits."
+        )
         rh = _load_csv(GOLD / "regression_hitters.csv")
         if rh is not None:
             gap_col = "xwoba_minus_woba" if "xwoba_minus_woba" in rh.columns else "est_woba_minus_woba_diff"
@@ -295,6 +338,12 @@ def page_regression_watch():
 
     with col2:
         st.subheader("Pitchers")
+        st.caption(
+            "These pitchers have ERAs significantly lower than their expected ERA (xERA). "
+            "A large negative gap means they've been getting lucky with strand rate, BABIP "
+            "against, or sequencing. Their stuff quality doesn't support the current ERA. "
+            "Expect the ERA to rise."
+        )
         rp = _load_csv(GOLD / "regression_pitchers.csv")
         if rp is not None:
             gap_col = "xera_minus_era" if "xera_minus_era" in rp.columns else "era_minus_xera_diff"
@@ -314,6 +363,12 @@ def page_regression_watch():
 
 def page_prospect_pipeline():
     st.header("Prospect Pipeline")
+    st.caption(
+        "Tracked minor league prospects with current stats and call-up indicators. "
+        "A prospect is flagged as a call-up candidate if performing significantly above "
+        "their level (wRC+ > 130 for hitters, ERA < 3.50 with WHIP < 1.25 for pitchers "
+        "at Double-A or higher) and on the 40-man roster."
+    )
 
     prospects = _load_csv(GOLD / "prospect_alerts.csv")
     if prospects is None:
@@ -356,7 +411,7 @@ def main():
         with st.spinner("Running weekly refresh..."):
             try:
                 from scripts.weekly_refresh import main as refresh_main
-                refresh_main()
+                refresh_main(argv=[])
                 st.sidebar.success("Refresh complete!")
                 st.rerun()
             except Exception as e:

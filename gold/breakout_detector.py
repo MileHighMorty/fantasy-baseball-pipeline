@@ -6,20 +6,29 @@ their surface-level results, suggesting positive regression ahead.
 Inputs:
     silver/data/statcast_hitters.parquet
     silver/data/statcast_pitchers.parquet
+    bronze/data/fantrax/all_rosters_*.csv (from dynasty-cap-manager)
 
 Outputs:
-    gold/data/breakout_hitters.csv
-    gold/data/breakout_pitchers.csv
+    gold/data/breakout_hitters_all.csv
+    gold/data/breakout_pitchers_all.csv
+    gold/data/breakout_hitters_fa.csv
+    gold/data/breakout_pitchers_fa.csv
 """
 
 import pathlib
 
 import pandas as pd
+from rapidfuzz import process, fuzz
 
 # ── paths ────────────────────────────────────────────────────────────
 
 SILVER_DIR = pathlib.Path(__file__).resolve().parent.parent / "silver" / "data"
 GOLD_DIR = pathlib.Path(__file__).resolve().parent / "data"
+FANTRAX_DIR = (
+    pathlib.Path.home() / "projects" / "dynasty-cap-manager" / "bronze" / "data" / "fantrax"
+)
+
+FUZZY_THRESHOLD = 90
 
 # ── thresholds ───────────────────────────────────────────────────────
 
@@ -49,6 +58,63 @@ def load_pitchers() -> pd.DataFrame:
         DataFrame with xERA differentials and percentile ranks.
     """
     return pd.read_parquet(SILVER_DIR / "statcast_pitchers.parquet")
+
+
+# ── roster / ownership ──────────────────────────────────────────────
+
+
+def load_all_rosters() -> pd.DataFrame | None:
+    """Load the latest date-stamped all_rosters CSV from Fantrax."""
+    files = sorted(FANTRAX_DIR.glob("all_rosters_*.csv"))
+    if not files:
+        print("  WARNING: No all_rosters CSV found in", FANTRAX_DIR)
+        return None
+    latest = files[-1]
+    print(f"  Loaded roster file: {latest.name}")
+    df = pd.read_csv(latest)
+    df["player_name"] = df["player_name"].str.strip()
+    return df
+
+
+def _build_owned_set(rosters: pd.DataFrame) -> set[str]:
+    """Return the set of owned player names (exclude 'None' placeholders)."""
+    names = rosters.loc[rosters["player_name"].notna(), "player_name"]
+    return {n for n in names if n != "None"}
+
+
+def tag_ownership(
+    breakout: pd.DataFrame,
+    rosters: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Add an 'ownership' column: team name if owned, 'FA' if not."""
+    df = breakout.copy()
+    if rosters is None:
+        df["ownership"] = "Unknown"
+        return df
+
+    owned_names = _build_owned_set(rosters)
+    # Build a lookup: owned_name -> team_name
+    roster_lookup: dict[str, str] = {}
+    for _, row in rosters.iterrows():
+        pn = row["player_name"]
+        if pd.notna(pn) and pn != "None":
+            roster_lookup[pn] = row["team_name"]
+
+    owned_list = list(owned_names)
+
+    def _match(player: str) -> str:
+        if not owned_list:
+            return "FA"
+        result = process.extractOne(
+            player, owned_list, scorer=fuzz.token_sort_ratio, score_cutoff=FUZZY_THRESHOLD
+        )
+        if result is None:
+            return "FA"
+        matched_name = result[0]
+        return roster_lookup.get(matched_name, "FA")
+
+    df["ownership"] = df["player_name"].apply(_match)
+    return df
 
 
 # ── detection ────────────────────────────────────────────────────────
@@ -185,29 +251,38 @@ def main() -> None:
     pitchers = load_pitchers()
     print(f"  {len(pitchers)} pitchers loaded")
 
+    print("Loading Fantrax rosters for ownership tagging...")
+    rosters = load_all_rosters()
+
     print("Detecting breakout hitters...")
     breakout_h = detect_breakout_hitters(hitters)
-    print(f"  {len(breakout_h)} breakout hitter candidates\n")
+    breakout_h = tag_ownership(breakout_h, rosters)
+    fa_h = breakout_h[breakout_h["ownership"] == "FA"].reset_index(drop=True)
+    print(f"  {len(breakout_h)} breakout hitter candidates ({len(fa_h)} free agents)\n")
     if not breakout_h.empty:
         print_hitter_table(breakout_h)
     print()
 
     print("Detecting breakout pitchers...")
     breakout_p = detect_breakout_pitchers(pitchers)
-    print(f"  {len(breakout_p)} breakout pitcher candidates\n")
+    breakout_p = tag_ownership(breakout_p, rosters)
+    fa_p = breakout_p[breakout_p["ownership"] == "FA"].reset_index(drop=True)
+    print(f"  {len(breakout_p)} breakout pitcher candidates ({len(fa_p)} free agents)\n")
     if not breakout_p.empty:
         print_pitcher_table(breakout_p)
     print()
 
     GOLD_DIR.mkdir(parents=True, exist_ok=True)
 
-    h_path = GOLD_DIR / "breakout_hitters.csv"
-    breakout_h.to_csv(h_path, index=False)
-    print(f"Saved {h_path}")
-
-    p_path = GOLD_DIR / "breakout_pitchers.csv"
-    breakout_p.to_csv(p_path, index=False)
-    print(f"Saved {p_path}")
+    for df, name in [
+        (breakout_h, "breakout_hitters_all.csv"),
+        (fa_h, "breakout_hitters_fa.csv"),
+        (breakout_p, "breakout_pitchers_all.csv"),
+        (fa_p, "breakout_pitchers_fa.csv"),
+    ]:
+        path = GOLD_DIR / name
+        df.to_csv(path, index=False)
+        print(f"Saved {path}  ({len(df)} rows)")
 
 
 if __name__ == "__main__":
