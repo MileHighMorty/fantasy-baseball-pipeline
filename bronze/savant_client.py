@@ -11,7 +11,8 @@ from datetime import date
 import requests
 
 BASE_URL = "https://baseballsavant.mlb.com"
-LEADERBOARD_URL = f"{BASE_URL}/leaderboard/custom"
+EXPECTED_STATS_URL = f"{BASE_URL}/leaderboard/expected_statistics"
+STATCAST_URL = f"{BASE_URL}/leaderboard/statcast"
 PLAYER_URL = f"{BASE_URL}/statcast_search/csv"
 
 DATA_DIR = pathlib.Path(__file__).resolve().parent / "data" / "savant"
@@ -66,59 +67,85 @@ def _save_csv(text: str, filename: str) -> pathlib.Path:
     return path
 
 
-def fetch_batting_leaderboard(
-    season: int = CURRENT_SEASON, month: int = 0
-) -> str:
+def fetch_batting_leaderboard(season: int = CURRENT_SEASON) -> str:
     """Pull the Statcast expected-stats batting leaderboard CSV.
 
-    Baseball Savant's 'expected' stat group includes xBA, xSLG, xwOBA,
-    and barrel metrics -- the core Statcast quality-of-contact numbers
-    used for evaluating hitter talent independent of BABIP luck.
+    Uses the ``expected_statistics`` endpoint which returns xBA, xSLG,
+    xwOBA, and their actual-vs-expected differentials for qualified
+    batters.
 
     Args:
         season: MLB season year. Defaults to the current year.
-        month: Month filter (0 = full season). Defaults to 0.
 
     Returns:
-        Raw CSV text of the batting leaderboard.
+        Raw CSV text of the batting expected-stats leaderboard.
     """
     params = {
-        "view": "Batter",
-        "n": "qual",
-        "filteredStatGroup": "expected",
-        "season": season,
-        "month": month,
+        "type": "batter",
+        "year": season,
+        "position": "",
+        "team": "",
+        "min": "q",
         "csv": "true",
     }
-    return _get_csv(LEADERBOARD_URL, params=params)
+    return _get_csv(EXPECTED_STATS_URL, params=params)
 
 
-def fetch_pitching_leaderboard(
-    season: int = CURRENT_SEASON, month: int = 0
-) -> str:
+def fetch_pitching_leaderboard(season: int = CURRENT_SEASON) -> str:
     """Pull the Statcast expected-stats pitching leaderboard CSV.
 
-    Mirrors the batting leaderboard but from the pitcher perspective --
-    xBA-against, xSLG-against, xwOBA-against, and barrel-rate-against.
-    Useful for identifying pitchers whose surface ERA is masking poor
-    underlying contact quality.
+    Uses the ``expected_statistics`` endpoint which returns xBA-against,
+    xSLG-against, xwOBA-against, xERA, and their differentials for
+    qualified pitchers.
 
     Args:
         season: MLB season year. Defaults to the current year.
-        month: Month filter (0 = full season). Defaults to 0.
 
     Returns:
-        Raw CSV text of the pitching leaderboard.
+        Raw CSV text of the pitching expected-stats leaderboard.
     """
     params = {
-        "view": "Pitcher",
-        "n": "qual",
-        "filteredStatGroup": "expected",
-        "season": season,
-        "month": month,
+        "type": "pitcher",
+        "year": season,
+        "position": "",
+        "team": "",
+        "min": "q",
         "csv": "true",
     }
-    return _get_csv(LEADERBOARD_URL, params=params)
+    return _get_csv(EXPECTED_STATS_URL, params=params)
+
+
+def fetch_statcast_leaderboard(
+    player_type: str = "batter", season: int = CURRENT_SEASON
+) -> str:
+    """Pull the Statcast batted-ball leaderboard CSV.
+
+    Returns exit velocity, launch angle, barrel rate, and hard-hit
+    metrics for qualified batters or pitchers.
+
+    Args:
+        player_type: ``'batter'`` or ``'pitcher'``.
+        season: MLB season year. Defaults to the current year.
+
+    Returns:
+        Raw CSV text of the Statcast batted-ball leaderboard.
+
+    Raises:
+        ValueError: If *player_type* is not ``'batter'`` or ``'pitcher'``.
+    """
+    if player_type not in ("batter", "pitcher"):
+        raise ValueError(
+            f"player_type must be 'batter' or 'pitcher', got {player_type!r}"
+        )
+    params = {
+        "type": player_type,
+        "year": season,
+        "position": "",
+        "team": "",
+        "min": "q",
+        "csv": "true",
+    }
+    return _get_csv(STATCAST_URL, params=params)
 
 
 def fetch_player_statcast(
@@ -160,20 +187,22 @@ def fetch_player_statcast(
 
 def save_leaderboards(
     today: date | None = None, season: int = CURRENT_SEASON
-) -> tuple[pathlib.Path, pathlib.Path]:
-    """Fetch and save both batting and pitching leaderboards.
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, pathlib.Path]:
+    """Fetch and save expected-stats and batted-ball leaderboards.
 
     This is the primary entry point for the daily bronze-layer Savant
-    ingestion. It pulls the current season's expected-stats leaderboards
-    for both batters and pitchers, then writes them to date-stamped CSVs
-    so downstream silver/gold layers always have a historical trail.
+    ingestion. It pulls the current season's expected-stats and Statcast
+    batted-ball leaderboards for both batters and pitchers, then writes
+    them to date-stamped CSVs so downstream silver/gold layers always
+    have a historical trail.
 
     Args:
         today: Date used for the filename stamp. Defaults to today.
         season: MLB season year. Defaults to the current year.
 
     Returns:
-        A tuple of (batting_path, pitching_path) for the saved files.
+        A tuple of ``(batting_path, pitching_path,
+        batting_statcast_path, pitching_statcast_path)``.
     """
     today = today or date.today()
     date_str = today.isoformat()
@@ -184,7 +213,13 @@ def save_leaderboards(
     pitching_csv = fetch_pitching_leaderboard(season=season)
     pitching_path = _save_csv(pitching_csv, f"{date_str}_pitching.csv")
 
-    return batting_path, pitching_path
+    batting_sc = fetch_statcast_leaderboard("batter", season=season)
+    batting_sc_path = _save_csv(batting_sc, f"{date_str}_batting_statcast.csv")
+
+    pitching_sc = fetch_statcast_leaderboard("pitcher", season=season)
+    pitching_sc_path = _save_csv(pitching_sc, f"{date_str}_pitching_statcast.csv")
+
+    return batting_path, pitching_path, batting_sc_path, pitching_sc_path
 
 
 def save_player_statcast(
@@ -217,9 +252,11 @@ def main() -> None:
     """Pull today's Savant leaderboards and print the output paths."""
     print("Fetching Statcast leaderboards...")
     try:
-        batting_path, pitching_path = save_leaderboards()
-        print(f"Batting:  {batting_path}")
-        print(f"Pitching: {pitching_path}")
+        bat, pit, bat_sc, pit_sc = save_leaderboards()
+        print(f"Batting expected:    {bat}")
+        print(f"Pitching expected:   {pit}")
+        print(f"Batting statcast:    {bat_sc}")
+        print(f"Pitching statcast:   {pit_sc}")
     except requests.HTTPError as exc:
         print(f"HTTP error fetching leaderboards: {exc}")
     except requests.ConnectionError as exc:
