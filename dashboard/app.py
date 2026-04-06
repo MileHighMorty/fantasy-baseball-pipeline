@@ -10,6 +10,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import numpy as np
 from rapidfuzz import process, fuzz
 
 # Ensure project root is on the path so we can import scripts.weekly_refresh
@@ -93,7 +94,7 @@ def _fuzzy_merge(
             match_row = right.loc[right[right_name_col] == match_name].iloc[0]
             matched_rows.append({c: match_row[c] for c in cols_to_add if c in match_row.index})
         else:
-            matched_rows.append({c: None for c in cols_to_add})
+            matched_rows.append({c: np.nan for c in cols_to_add})
 
     extra = pd.DataFrame(matched_rows, index=base.index)
     return pd.concat([base, extra], axis=1)
@@ -257,11 +258,16 @@ def page_session_prep():
             df["team"] = None
         missing_team = df["team"].isna()
         if missing_team.any() and player_univ is not None:
-            df.loc[missing_team] = _fuzzy_merge(
+            merged = _fuzzy_merge(
                 df.loc[missing_team].drop(columns=["team"]),
                 player_univ[["player_name", "team"]],
                 cols_to_add=["team"],
-            ).values
+            )
+            # Align dtypes so assignment doesn't fail on float64 columns
+            for col in merged.columns:
+                if col in df.columns:
+                    merged[col] = merged[col].astype(df[col].dtype, errors="ignore")
+            df.loc[missing_team] = merged.values
             # Re-check after player_universe fill
             missing_team = df["team"].isna()
         if missing_team.any() and not fg_data.empty:
