@@ -187,6 +187,119 @@ def _score_color(val):
 # Pages
 # ---------------------------------------------------------------------------
 
+def _render_matchup_overview():
+    """Weekly Matchup Overview: head-to-head category comparison."""
+    _PITCHER_POS = {"SP", "RP", "P"}
+
+    opponent_name = st.sidebar.text_input("Opponent Team Name", value="Ben")
+
+    all_rosters = _load_all_rosters()
+    my_roster_df = _load_my_roster_df()
+    hitters_sc = _load_parquet(SILVER / "statcast_hitters.parquet")
+    pitchers_sc = _load_parquet(SILVER / "statcast_pitchers.parquet")
+
+    if any(x is None for x in [all_rosters, my_roster_df, hitters_sc, pitchers_sc]):
+        st.warning("Missing data for matchup overview.")
+        return
+
+    # Split opponent roster
+    opp = all_rosters[all_rosters["team_name"].str.lower() == opponent_name.strip().lower()].copy()
+    if opp.empty:
+        st.info(f"No roster found for '{opponent_name}'.")
+        return
+    opp["player_name"] = opp["player_name"].str.strip()
+    opp["player_type"] = opp["position"].apply(
+        lambda p: "Pitcher" if p in _PITCHER_POS else "Hitter"
+    )
+
+    # Split my roster
+    my = my_roster_df.copy()
+    my = my[my["player_name"].notna() & (my["player_name"] != "None")]
+    my["player_type"] = my["fantrax_position"].apply(
+        lambda p: "Pitcher" if p in _PITCHER_POS else "Hitter"
+    )
+
+    def _fuzzy_match_names(names: list[str], statcast_df: pd.DataFrame) -> pd.DataFrame:
+        sc_names = statcast_df["player_name"].dropna().unique().tolist()
+        rows = []
+        for name in names:
+            result = process.extractOne(name, sc_names, scorer=fuzz.token_sort_ratio, score_cutoff=FUZZY_THRESHOLD)
+            if result:
+                rows.append(statcast_df[statcast_df["player_name"] == result[0]].iloc[0])
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+    my_h = _fuzzy_match_names(my[my["player_type"] == "Hitter"]["player_name"].tolist(), hitters_sc)
+    opp_h = _fuzzy_match_names(opp[opp["player_type"] == "Hitter"]["player_name"].tolist(), hitters_sc)
+    my_p = _fuzzy_match_names(my[my["player_type"] == "Pitcher"]["player_name"].tolist(), pitchers_sc)
+    opp_p = _fuzzy_match_names(opp[opp["player_type"] == "Pitcher"]["player_name"].tolist(), pitchers_sc)
+
+    # Build category comparisons
+    def _safe(val, fmt=".3f"):
+        return f"{val:{fmt}}" if pd.notna(val) else "N/A"
+
+    my_hr = int((my_h["barrel_percentile"] > 50).sum()) if not my_h.empty else 0
+    opp_hr = int((opp_h["barrel_percentile"] > 50).sum()) if not opp_h.empty else 0
+
+    my_sb = int((my_h["sprint_speed"] > 28).sum()) if not my_h.empty and "sprint_speed" in my_h.columns else 0
+    opp_sb = int((opp_h["sprint_speed"] > 28).sum()) if not opp_h.empty and "sprint_speed" in opp_h.columns else 0
+
+    my_obp = my_h["est_woba"].mean() if not my_h.empty else np.nan
+    opp_obp = opp_h["est_woba"].mean() if not opp_h.empty else np.nan
+
+    my_k = len(my_p) if not my_p.empty else 0
+    opp_k = len(opp_p) if not opp_p.empty else 0
+
+    my_era = my_p["xera"].mean() if not my_p.empty else np.nan
+    opp_era = opp_p["xera"].mean() if not opp_p.empty else np.nan
+
+    # Detect RPs
+    opp_rp_names = opp[opp["position"] == "RP"]["player_name"].tolist()
+    opp_rp_count = len(opp_rp_names)
+
+    categories = [
+        ("HR (barrel%ile>50)", str(my_hr), str(opp_hr), my_hr - opp_hr),
+        ("SB (speed>28)", str(my_sb), str(opp_sb), my_sb - opp_sb),
+        ("OBP (avg xwOBA)", _safe(my_obp), _safe(opp_obp),
+         (my_obp - opp_obp) if pd.notna(my_obp) and pd.notna(opp_obp) else 0),
+        ("K (SP count)", str(my_k), str(opp_k), my_k - opp_k),
+        ("ERA (avg xERA)", _safe(my_era), _safe(opp_era),
+         (opp_era - my_era) if pd.notna(my_era) and pd.notna(opp_era) else 0),  # lower is better
+        ("SVH", "PUNT", str(opp_rp_count) + " RPs", -1),  # always red
+    ]
+
+    rows = []
+    my_wins = 0
+    opp_wins = 0
+    for cat, my_val, opp_val, diff in categories:
+        if diff > 0.001:
+            edge = "✅ My Edge"
+            my_wins += 1
+        elif diff < -0.001:
+            edge = "❌ Opp Edge"
+            opp_wins += 1
+        else:
+            edge = "⚠️ Close"
+        rows.append({"Category": cat, "My Team": my_val, opponent_name: opp_val, "Edge": edge})
+
+    with st.expander("Weekly Matchup Overview", expanded=True):
+        comp_df = pd.DataFrame(rows)
+        st.dataframe(
+            comp_df.style.apply(
+                lambda col: [
+                    "background-color: #1a472a" if "My Edge" in v
+                    else "background-color: #5c1a1a" if "Opp Edge" in v
+                    else "background-color: #4a4a00" if "Close" in v
+                    else ""
+                    for v in col
+                ] if col.name == "Edge" else [""] * len(col),
+                axis=0,
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.markdown(f"**Projected: {my_wins}-{opp_wins}**")
+
+
 def page_session_prep():
     st.header("Session Prep")
 
@@ -196,6 +309,9 @@ def page_session_prep():
         st.caption(f"Last refreshed: **{ts}**")
     else:
         st.warning("No data files found in gold/data/")
+
+    # --- Weekly Matchup Overview ---
+    _render_matchup_overview()
 
     # --- My Roster Health ---
     st.subheader("My Roster Health")
