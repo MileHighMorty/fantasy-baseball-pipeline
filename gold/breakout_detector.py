@@ -147,12 +147,11 @@ def detect_breakout_hitters(df: pd.DataFrame) -> pd.DataFrame:
 def detect_breakout_pitchers(df: pd.DataFrame) -> pd.DataFrame:
     """Flag pitcher breakout candidates based on expected-stat gaps.
 
-    A pitcher qualifies when ALL conditions are true:
+    Primary filter (required):
         - ``xera_minus_era >= 0.50`` (ERA should be lower than it is)
-        - ``k_minus_bb_pct >= 10`` (solid strikeout-walk differential)
 
-    If ``k_minus_bb_pct`` is not available in the source data, that
-    filter is skipped and a warning is printed.
+    Optional secondary filter (applied only when data is available and valid):
+        - ``k_minus_bb_pct`` — used for sorting, not hard filtering
 
     Args:
         df: Enriched pitcher DataFrame from the silver layer.
@@ -160,21 +159,27 @@ def detect_breakout_pitchers(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         Filtered DataFrame ranked by ``xera_minus_era`` descending.
     """
+    print(f"  Pitcher columns available: {list(df.columns)}")
+
     mask = df["xera_minus_era"] >= PITCHER_XERA_GAP
+    print(f"  Pitchers with xera_minus_era >= {PITCHER_XERA_GAP}: {mask.sum()}")
 
-    if "k_minus_bb_pct" in df.columns:
-        mask = mask & (df["k_minus_bb_pct"] >= PITCHER_K_BB_PCT)
+    if "k_minus_bb_pct" in df.columns and df["k_minus_bb_pct"].notna().any():
+        print(f"  k_minus_bb_pct range: {df['k_minus_bb_pct'].min():.3f} – {df['k_minus_bb_pct'].max():.3f}")
+        print("  k_minus_bb_pct used for sorting (not as hard filter)")
     else:
-        print(
-            "  WARNING: k_minus_bb_pct not available in pitcher data; "
-            "skipping K-BB% filter"
-        )
+        print("  WARNING: k_minus_bb_pct not available or empty; skipping")
 
-    return (
-        df.loc[mask]
-        .sort_values("xera_minus_era", ascending=False)
-        .reset_index(drop=True)
-    )
+    result = df.loc[mask].copy()
+
+    # Sort by xera gap, then k-bb% as tiebreaker if available
+    sort_cols = ["xera_minus_era"]
+    sort_asc = [False]
+    if "k_minus_bb_pct" in result.columns and result["k_minus_bb_pct"].notna().any():
+        sort_cols.append("k_minus_bb_pct")
+        sort_asc.append(False)
+
+    return result.sort_values(sort_cols, ascending=sort_asc).reset_index(drop=True)
 
 
 # ── display ──────────────────────────────────────────────────────────
@@ -265,9 +270,10 @@ def main() -> None:
 
     print("Detecting breakout pitchers...")
     breakout_p = detect_breakout_pitchers(pitchers)
+    print(f"  {len(breakout_p)} total pitcher breakout candidates")
     breakout_p = tag_ownership(breakout_p, rosters)
     fa_p = breakout_p[breakout_p["ownership"] == "FA"].reset_index(drop=True)
-    print(f"  {len(breakout_p)} breakout pitcher candidates ({len(fa_p)} free agents)\n")
+    print(f"  {len(fa_p)} FA pitcher breakout candidates\n")
     if not breakout_p.empty:
         print_pitcher_table(breakout_p)
     print()

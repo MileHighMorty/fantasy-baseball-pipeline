@@ -4,10 +4,13 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+import logging
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from rapidfuzz import process, fuzz
 
 # Ensure project root is on the path so we can import scripts.weekly_refresh
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -16,8 +19,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 GOLD = PROJECT_ROOT / "gold" / "data"
 SILVER = PROJECT_ROOT / "silver" / "data"
+FANGRAPHS = PROJECT_ROOT / "bronze" / "data" / "fangraphs"
 FANTRAX = Path.home() / "projects" / "dynasty-cap-manager" / "bronze" / "data" / "fantrax"
 MY_TEAM = "Rutsch Hour"
+FUZZY_THRESHOLD = 85
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -47,6 +54,66 @@ def _load_my_roster_df() -> pd.DataFrame | None:
         return None
     df["player_name"] = df["player_name"].str.strip()
     return df[["player_name", "position"]].rename(columns={"position": "fantrax_position"})
+
+
+def _fuzzy_merge(
+    base: pd.DataFrame,
+    right: pd.DataFrame,
+    right_name_col: str = "player_name",
+    cols_to_add: list[str] | None = None,
+    threshold: int = FUZZY_THRESHOLD,
+) -> pd.DataFrame:
+    """LEFT JOIN *right* onto *base* by fuzzy-matching player names.
+
+    Only columns listed in *cols_to_add* are brought over (or all non-name
+    columns if None).  Existing columns in *base* are NOT overwritten.
+    """
+    if right is None or right.empty:
+        return base
+
+    right_names = right[right_name_col].dropna().unique().tolist()
+    if not right_names:
+        return base
+
+    if cols_to_add is None:
+        cols_to_add = [c for c in right.columns if c != right_name_col]
+    # Only bring columns that don't already exist in base
+    cols_to_add = [c for c in cols_to_add if c not in base.columns]
+    if not cols_to_add:
+        return base
+
+    matched_rows = []
+    for _, row in base.iterrows():
+        result = process.extractOne(
+            row["player_name"], right_names,
+            scorer=fuzz.token_sort_ratio, score_cutoff=threshold,
+        )
+        if result is not None:
+            match_name = result[0]
+            match_row = right.loc[right[right_name_col] == match_name].iloc[0]
+            matched_rows.append({c: match_row[c] for c in cols_to_add if c in match_row.index})
+        else:
+            matched_rows.append({c: None for c in cols_to_add})
+
+    extra = pd.DataFrame(matched_rows, index=base.index)
+    return pd.concat([base, extra], axis=1)
+
+
+def _load_fangraphs_team_pos() -> pd.DataFrame:
+    """Load team and position info from FanGraphs batting + pitching CSVs."""
+    frames = []
+    for pattern, pos_source in [("*batting*.csv", "batting"), ("*pitching*.csv", "pitching")]:
+        files = sorted(FANGRAPHS.glob(pattern))
+        if not files:
+            continue
+        df = pd.read_csv(files[-1], usecols=lambda c: c in ("Name", "Team"))
+        df = df.rename(columns={"Name": "player_name", "Team": "fg_team"})
+        if pos_source == "pitching":
+            df["fg_position"] = "P"
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame(columns=["player_name", "fg_team", "fg_position"])
+    return pd.concat(frames, ignore_index=True).drop_duplicates(subset="player_name", keep="first")
 
 
 def _load_all_rosters() -> pd.DataFrame | None:
@@ -164,16 +231,56 @@ def page_session_prep():
     roster_hitters = my_roster_df[my_roster_df["player_type"] == "Hitter"].copy()
     roster_pitchers = my_roster_df[my_roster_df["player_type"] == "Pitcher"].copy()
 
-    # LEFT JOIN statcast data onto roster so every rostered player appears
-    # Drop overlapping non-key columns from statcast before merge to avoid suffixes
-    if hitters_statcast is not None:
-        h_stat = hitters_statcast.drop(columns=["position"], errors="ignore")
-        roster_hitters = roster_hitters.merge(h_stat, on="player_name", how="left")
-    if pitchers_statcast is not None:
-        p_stat = pitchers_statcast.drop(columns=["position"], errors="ignore")
-        roster_pitchers = roster_pitchers.merge(p_stat, on="player_name", how="left")
+    # Fuzzy LEFT JOIN statcast metrics onto roster (Fantrax is the base)
+    _hitter_metric_cols = ["team", "woba", "est_woba", "xwoba_minus_woba",
+                           "hard_hit_percentile", "barrel_percentile"]
+    _pitcher_metric_cols = ["team", "xera", "era", "xera_minus_era",
+                            "k_percent", "barrel_percentile"]
 
-    # Use Fantrax position as the display position
+    if hitters_statcast is not None:
+        roster_hitters = _fuzzy_merge(
+            roster_hitters, hitters_statcast,
+            cols_to_add=_hitter_metric_cols,
+        )
+    if pitchers_statcast is not None:
+        roster_pitchers = _fuzzy_merge(
+            roster_pitchers, pitchers_statcast,
+            cols_to_add=_pitcher_metric_cols,
+        )
+
+    # Fill missing MLB team from player_universe or FanGraphs
+    player_univ = _load_parquet(SILVER / "player_universe.parquet")
+    fg_data = _load_fangraphs_team_pos()
+
+    for df in (roster_hitters, roster_pitchers):
+        if "team" not in df.columns:
+            df["team"] = None
+        missing_team = df["team"].isna()
+        if missing_team.any() and player_univ is not None:
+            df.loc[missing_team] = _fuzzy_merge(
+                df.loc[missing_team].drop(columns=["team"]),
+                player_univ[["player_name", "team"]],
+                cols_to_add=["team"],
+            ).values
+            # Re-check after player_universe fill
+            missing_team = df["team"].isna()
+        if missing_team.any() and not fg_data.empty:
+            for idx in df.index[missing_team]:
+                name = df.at[idx, "player_name"]
+                result = process.extractOne(
+                    name, fg_data["player_name"].tolist(),
+                    scorer=fuzz.token_sort_ratio, score_cutoff=FUZZY_THRESHOLD,
+                )
+                if result is not None:
+                    fg_row = fg_data.loc[fg_data["player_name"] == result[0]].iloc[0]
+                    df.at[idx, "team"] = fg_row.get("fg_team")
+
+        # Log any still-missing
+        still_missing = df.loc[df["team"].isna(), "player_name"].tolist()
+        if still_missing:
+            logger.warning("Players still missing MLB team: %s", still_missing)
+
+    # Fantrax position is ALWAYS the authoritative position
     for df in (roster_hitters, roster_pitchers):
         df["position"] = df["fantrax_position"]
 
@@ -205,7 +312,7 @@ def page_session_prep():
                 h_display.append(gap_col)
 
             fmt = {c: "{:.3f}" for c in h_display if c not in ("player_name", "team", "position")}
-            styled_h = hit_df[h_display].style.format(fmt, na_rep="N/A")
+            styled_h = hit_df[h_display].style.format(fmt, na_rep="-")
             if gap_col in hit_df.columns:
                 styled_h = styled_h.map(_color_xwoba_gap, subset=[gap_col])
             st.dataframe(styled_h, use_container_width=True, hide_index=True,
@@ -233,7 +340,7 @@ def page_session_prep():
                 p_display.append(era_gap)
 
             fmt = {c: "{:.2f}" for c in p_display if c not in ("player_name", "team", "position")}
-            styled_p = pit_df[p_display].style.format(fmt, na_rep="N/A")
+            styled_p = pit_df[p_display].style.format(fmt, na_rep="-")
             if era_gap and era_gap in pit_df.columns:
                 styled_p = styled_p.map(_color_xwoba_gap, subset=[era_gap])
             st.dataframe(styled_p, use_container_width=True, hide_index=True,
@@ -249,21 +356,64 @@ def page_session_prep():
         "— the process is right, the outcomes haven't caught up. These are buy-low "
         "candidates before the market notices."
     )
+
+    # Load FanGraphs data once for position fill on FA breakout tables
+    fg_lookup = _load_fangraphs_team_pos()
+
+    def _fill_fa_position(df: pd.DataFrame) -> pd.DataFrame:
+        """Fill missing position/team on FA breakout players from FanGraphs or Savant."""
+        if df is None or df.empty:
+            return df
+        df = df.copy()
+        for col_to_fill, fg_col in [("position", "fg_position"), ("team", "fg_team")]:
+            if col_to_fill not in df.columns:
+                df[col_to_fill] = None
+            missing = df[col_to_fill].isna() | (df[col_to_fill].astype(str).isin(["None", ""]))
+            if not missing.any() or fg_lookup.empty:
+                continue
+            for idx in df.index[missing]:
+                name = df.at[idx, "player_name"]
+                result = process.extractOne(
+                    name, fg_lookup["player_name"].tolist(),
+                    scorer=fuzz.token_sort_ratio, score_cutoff=FUZZY_THRESHOLD,
+                )
+                if result is not None:
+                    fg_row = fg_lookup.loc[fg_lookup["player_name"] == result[0]].iloc[0]
+                    if fg_col in fg_row.index and pd.notna(fg_row[fg_col]):
+                        df.at[idx, col_to_fill] = fg_row[fg_col]
+
+        # Log still-missing
+        for col_to_fill in ("position", "team"):
+            if col_to_fill in df.columns:
+                still_null = df.loc[
+                    df[col_to_fill].isna() | (df[col_to_fill].astype(str).isin(["None", ""])),
+                    "player_name"
+                ].tolist()
+                if still_null:
+                    logger.warning("FA breakout players missing %s: %s", col_to_fill, still_null)
+        return df
+
     with col1:
         st.subheader("Top 10 Breakout Hitter Adds")
         st.caption(breakout_caption)
         bh = _load_csv(GOLD / "breakout_hitters_fa.csv")
         if bh is not None:
+            bh = _fill_fa_position(bh)
             show_cols = [c for c in ["player_name", "team", "position", "est_woba", "woba", "xwoba_minus_woba", "hard_hit_percentile", "barrel_percentile"] if c in bh.columns]
-            st.dataframe(bh[show_cols].head(10), use_container_width=True, hide_index=True)
+            fmt = {c: "{:.3f}" for c in show_cols if c not in ("player_name", "team", "position", "hard_hit_percentile", "barrel_percentile")}
+            fmt.update({c: "{:.0f}" for c in show_cols if c in ("hard_hit_percentile", "barrel_percentile")})
+            st.dataframe(bh[show_cols].head(10).style.format(fmt, na_rep="-"), use_container_width=True, hide_index=True)
 
     with col2:
         st.subheader("Top 10 Breakout Pitcher Adds")
         st.caption(breakout_caption)
         bp = _load_csv(GOLD / "breakout_pitchers_fa.csv")
         if bp is not None:
+            bp = _fill_fa_position(bp)
             show_cols = [c for c in ["player_name", "team", "position", "xera", "era", "xera_minus_era", "k_percent", "barrel_percentile"] if c in bp.columns]
-            st.dataframe(bp[show_cols].head(10), use_container_width=True, hide_index=True)
+            fmt = {c: "{:.2f}" for c in show_cols if c not in ("player_name", "team", "position", "k_percent", "barrel_percentile")}
+            fmt.update({c: "{:.1f}" for c in show_cols if c in ("k_percent", "barrel_percentile")})
+            st.dataframe(bp[show_cols].head(10).style.format(fmt, na_rep="-"), use_container_width=True, hide_index=True)
 
 
 def _breakout_style_maps():
