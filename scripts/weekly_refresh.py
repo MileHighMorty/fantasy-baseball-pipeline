@@ -85,6 +85,7 @@ def run_silver() -> dict[str, bool]:
         Dict mapping module name to success/failure boolean.
     """
     modules = [
+        ("Player ID Map", "silver.player_id_map"),
         ("Player Universe", "silver.player_universe"),
         ("Statcast Enriched", "silver.statcast_enriched"),
     ]

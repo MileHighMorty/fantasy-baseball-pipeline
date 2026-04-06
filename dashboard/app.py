@@ -26,6 +26,15 @@ FANTRAX = Path.home() / "projects" / "dynasty-cap-manager" / "bronze" / "data" /
 MY_TEAM = "Rutsch Hour"
 FUZZY_THRESHOLD = 85
 
+
+@st.cache_data(ttl=3600)
+def _load_id_map() -> pd.DataFrame | None:
+    """Load the pre-built player ID map."""
+    path = SILVER / "player_id_map.parquet"
+    if path.exists():
+        return pd.read_parquet(path)
+    return None
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -252,19 +261,33 @@ def _render_matchup_overview():
         lambda p: "Pitcher" if p in _PITCHER_POS else "Hitter"
     )
 
-    def _fuzzy_match_names(names: list[str], statcast_df: pd.DataFrame) -> pd.DataFrame:
+    id_map = _load_id_map()
+
+    def _match_names_to_statcast(names: list[str], statcast_df: pd.DataFrame) -> pd.DataFrame:
+        """Match player names to statcast data via ID map (savant_player_id join)."""
+        if id_map is not None and "savant_player_id" in statcast_df.columns:
+            idm = id_map[["player_name", "savant_player_id"]].drop_duplicates(
+                subset=["player_name"], keep="first"
+            )
+            name_df = pd.DataFrame({"player_name": names})
+            joined = name_df.merge(idm, on="player_name", how="inner")
+            result = joined.merge(statcast_df, on="savant_player_id", how="inner", suffixes=("", "_sc"))
+            if "player_name_sc" in result.columns:
+                result = result.drop(columns=["player_name_sc"])
+            return result
+        # Fallback: fuzzy match
         sc_names = statcast_df["player_name"].dropna().unique().tolist()
         rows = []
         for name in names:
-            result = process.extractOne(name, sc_names, scorer=fuzz.token_sort_ratio, score_cutoff=FUZZY_THRESHOLD)
-            if result:
-                rows.append(statcast_df[statcast_df["player_name"] == result[0]].iloc[0])
+            res = process.extractOne(name, sc_names, scorer=fuzz.token_sort_ratio, score_cutoff=FUZZY_THRESHOLD)
+            if res:
+                rows.append(statcast_df[statcast_df["player_name"] == res[0]].iloc[0])
         return pd.DataFrame(rows) if rows else pd.DataFrame()
 
-    my_h = _fuzzy_match_names(my[my["player_type"] == "Hitter"]["player_name"].tolist(), hitters_sc)
-    opp_h = _fuzzy_match_names(opp[opp["player_type"] == "Hitter"]["player_name"].tolist(), hitters_sc)
-    my_p = _fuzzy_match_names(my[my["player_type"] == "Pitcher"]["player_name"].tolist(), pitchers_sc)
-    opp_p = _fuzzy_match_names(opp[opp["player_type"] == "Pitcher"]["player_name"].tolist(), pitchers_sc)
+    my_h = _match_names_to_statcast(my[my["player_type"] == "Hitter"]["player_name"].tolist(), hitters_sc)
+    opp_h = _match_names_to_statcast(opp[opp["player_type"] == "Hitter"]["player_name"].tolist(), hitters_sc)
+    my_p = _match_names_to_statcast(my[my["player_type"] == "Pitcher"]["player_name"].tolist(), pitchers_sc)
+    opp_p = _match_names_to_statcast(opp[opp["player_type"] == "Pitcher"]["player_name"].tolist(), pitchers_sc)
 
     # Build category comparisons
     def _safe(val, fmt=".3f"):
@@ -381,59 +404,52 @@ def page_session_prep():
     roster_hitters = my_roster_df[my_roster_df["player_type"] == "Hitter"].copy()
     roster_pitchers = my_roster_df[my_roster_df["player_type"] == "Pitcher"].copy()
 
-    # Fuzzy LEFT JOIN statcast metrics onto roster (Fantrax is the base)
-    _hitter_metric_cols = ["team", "woba", "est_woba", "xwoba_minus_woba",
+    # --- Use ID map for team/position and savant_player_id join ---
+    id_map = _load_id_map()
+
+    _hitter_metric_cols = ["woba", "est_woba", "xwoba_minus_woba",
                            "hard_hit_percentile", "barrel_percentile"]
-    _pitcher_metric_cols = ["team", "xera", "era", "xera_minus_era",
+    _pitcher_metric_cols = ["xera", "era", "xera_minus_era",
                             "k_percent", "barrel_percentile"]
 
-    if hitters_statcast is not None:
-        roster_hitters = _fuzzy_merge(
-            roster_hitters, hitters_statcast,
-            cols_to_add=_hitter_metric_cols,
-        )
-    if pitchers_statcast is not None:
-        roster_pitchers = _fuzzy_merge(
-            roster_pitchers, pitchers_statcast,
-            cols_to_add=_pitcher_metric_cols,
-        )
-
-    # Fill missing MLB team from player_universe or FanGraphs
-    player_univ = _load_parquet(SILVER / "player_universe.parquet")
-    fg_data = _load_fangraphs_team_pos()
-
-    for df in (roster_hitters, roster_pitchers):
-        if "team" not in df.columns:
-            df["team"] = None
-        missing_team = df["team"].isna()
-        if missing_team.any() and player_univ is not None:
-            merged = _fuzzy_merge(
-                df.loc[missing_team].drop(columns=["team"]),
-                player_univ[["player_name", "team"]],
-                cols_to_add=["team"],
+    if id_map is not None:
+        # Join ID map onto roster to get savant_player_id and team
+        for df, statcast, metric_cols in [
+            (roster_hitters, hitters_statcast, _hitter_metric_cols),
+            (roster_pitchers, pitchers_statcast, _pitcher_metric_cols),
+        ]:
+            # Merge ID map for savant_player_id and team
+            idm = id_map[["player_name", "savant_player_id", "team"]].drop_duplicates(
+                subset=["player_name"], keep="first"
             )
-            # Align dtypes so assignment doesn't fail on float64 columns
-            for col in merged.columns:
-                if col in df.columns:
-                    merged[col] = merged[col].astype(df[col].dtype, errors="ignore")
-            df.loc[missing_team] = merged.values
-            # Re-check after player_universe fill
-            missing_team = df["team"].isna()
-        if missing_team.any() and not fg_data.empty:
-            for idx in df.index[missing_team]:
-                name = df.at[idx, "player_name"]
-                result = process.extractOne(
-                    name, fg_data["player_name"].tolist(),
-                    scorer=fuzz.token_sort_ratio, score_cutoff=FUZZY_THRESHOLD,
-                )
-                if result is not None:
-                    fg_row = fg_data.loc[fg_data["player_name"] == result[0]].iloc[0]
-                    df.at[idx, "team"] = fg_row.get("fg_team")
+            df_merged = df.merge(idm, on="player_name", how="left")
 
-        # Log any still-missing
-        still_missing = df.loc[df["team"].isna(), "player_name"].tolist()
-        if still_missing:
-            logger.warning("Players still missing MLB team: %s", still_missing)
+            # Join statcast by savant_player_id (exact join, no fuzzy)
+            if statcast is not None and "savant_player_id" in statcast.columns:
+                sc_cols = ["savant_player_id"] + [c for c in metric_cols if c in statcast.columns]
+                sc_subset = statcast[sc_cols].drop_duplicates(subset=["savant_player_id"])
+                df_merged = df_merged.merge(sc_subset, on="savant_player_id", how="left", suffixes=("", "_sc"))
+                # If team came from ID map as NaN, try statcast
+                if "team_sc" in df_merged.columns:
+                    df_merged["team"] = df_merged["team"].fillna(df_merged["team_sc"])
+                    df_merged = df_merged.drop(columns=["team_sc"])
+
+            # Copy results back
+            for col in ["team", "savant_player_id"] + metric_cols:
+                if col in df_merged.columns:
+                    df[col] = df_merged[col].values
+    else:
+        # Fallback: fuzzy merge if no ID map
+        if hitters_statcast is not None:
+            roster_hitters = _fuzzy_merge(
+                roster_hitters, hitters_statcast,
+                cols_to_add=["team"] + _hitter_metric_cols,
+            )
+        if pitchers_statcast is not None:
+            roster_pitchers = _fuzzy_merge(
+                roster_pitchers, pitchers_statcast,
+                cols_to_add=["team"] + _pitcher_metric_cols,
+            )
 
     # Fantrax position is ALWAYS the authoritative position
     for df in (roster_hitters, roster_pitchers):
@@ -515,11 +531,33 @@ def page_session_prep():
     # Load FanGraphs data once for position fill on FA breakout tables
     fg_lookup = _load_fangraphs_team_pos()
 
+    breakout_id_map = _load_id_map()
+
     def _fill_fa_position(df: pd.DataFrame) -> pd.DataFrame:
-        """Fill missing position/team on FA breakout players from FanGraphs or Savant."""
+        """Fill missing position/team on FA breakout players from ID map or FanGraphs."""
         if df is None or df.empty:
             return df
         df = df.copy()
+
+        # Try ID map first
+        if breakout_id_map is not None:
+            idm = breakout_id_map[["player_name", "team", "position"]].drop_duplicates(
+                subset=["player_name"], keep="first"
+            )
+            for col in ("team", "position"):
+                if col not in df.columns:
+                    df[col] = None
+                missing = df[col].isna() | (df[col].astype(str).isin(["None", ""]))
+                if missing.any():
+                    fill = df.loc[missing].merge(
+                        idm[["player_name", col]], on="player_name", how="left", suffixes=("_old", "")
+                    )
+                    if f"{col}_old" in fill.columns:
+                        df.loc[missing, col] = fill[col].values
+                    elif col in fill.columns:
+                        df.loc[missing, col] = fill[col].values
+
+        # Fallback: FanGraphs fuzzy match for remaining gaps
         for col_to_fill, fg_col in [("position", "fg_position"), ("team", "fg_team")]:
             if col_to_fill not in df.columns:
                 df[col_to_fill] = None
@@ -537,15 +575,6 @@ def page_session_prep():
                     if fg_col in fg_row.index and pd.notna(fg_row[fg_col]):
                         df.at[idx, col_to_fill] = fg_row[fg_col]
 
-        # Log still-missing
-        for col_to_fill in ("position", "team"):
-            if col_to_fill in df.columns:
-                still_null = df.loc[
-                    df[col_to_fill].isna() | (df[col_to_fill].astype(str).isin(["None", ""])),
-                    "player_name"
-                ].tolist()
-                if still_null:
-                    logger.warning("FA breakout players missing %s: %s", col_to_fill, still_null)
         return df
 
     weekly_gp = _fetch_weekly_gp()
@@ -604,10 +633,23 @@ def _breakout_style_maps():
 
 
 def _add_ownership(df: pd.DataFrame) -> pd.DataFrame:
-    """Add ownership column if not already present, using all_rosters data."""
+    """Add ownership column if not already present, using ID map or all_rosters."""
     if "ownership" in df.columns:
         df["status"] = df["ownership"]
         return df
+
+    # Try ID map first for ownership lookup
+    id_map = _load_id_map()
+    if id_map is not None:
+        ownership_lookup = id_map[["player_name", "fantrax_team_name"]].drop_duplicates(
+            subset=["player_name"], keep="first"
+        )
+        merged = df.merge(ownership_lookup, on="player_name", how="left")
+        merged["status"] = merged["fantrax_team_name"].fillna("FA")
+        df["status"] = merged["status"].values
+        return df
+
+    # Fallback: all_rosters
     all_rosters = _load_all_rosters()
     my_names = _load_my_roster()
     if all_rosters is not None:
