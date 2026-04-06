@@ -2,10 +2,11 @@
 
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import logging
 
+import requests
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -146,6 +147,38 @@ def _load_parquet(path: Path) -> pd.DataFrame | None:
         return pd.read_parquet(path)
     st.warning(f"File not found: {path.name}")
     return None
+
+
+# MLB API abbreviation → Savant/FanGraphs abbreviation mapping (only mismatches)
+_MLB_TO_SAVANT_ABBR = {
+    "SF": "SFG", "TB": "TBR", "SD": "SDP", "KC": "KCR",
+    "CWS": "CWS", "WSH": "WSN", "AZ": "ARI",
+}
+
+
+@st.cache_data(ttl=3600)
+def _fetch_weekly_gp() -> dict[str, int] | None:
+    """Fetch MLB schedule for the next 7 days and return {team_abbr: game_count}."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    end = (datetime.now() + timedelta(days=6)).strftime("%Y-%m-%d")
+    url = f"https://statsapi.mlb.com/api/v1/schedule?startDate={today}&endDate={end}&sportId=1&hydrate=team"
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        logger.warning("Failed to fetch MLB schedule for GP_week column")
+        return None
+
+    counts: dict[str, int] = {}
+    for date_entry in data.get("dates", []):
+        for game in date_entry.get("games", []):
+            for side in ("away", "home"):
+                abbr = game.get("teams", {}).get(side, {}).get("team", {}).get("abbreviation")
+                if abbr:
+                    abbr = _MLB_TO_SAVANT_ABBR.get(abbr, abbr)
+                    counts[abbr] = counts.get(abbr, 0) + 1
+    return counts
 
 
 def _last_refreshed() -> str | None:
@@ -515,15 +548,24 @@ def page_session_prep():
                     logger.warning("FA breakout players missing %s: %s", col_to_fill, still_null)
         return df
 
+    weekly_gp = _fetch_weekly_gp()
+
+    def _add_gp_week(df: pd.DataFrame) -> pd.DataFrame:
+        """Add GP_week column from MLB schedule if available."""
+        if weekly_gp and "team" in df.columns:
+            df["GP_week"] = df["team"].map(weekly_gp)
+        return df
+
     with col1:
         st.subheader("Top 10 Breakout Hitter Adds")
         st.caption(breakout_caption)
         bh = _load_csv(GOLD / "breakout_hitters_fa.csv")
         if bh is not None:
             bh = _fill_fa_position(bh)
-            show_cols = [c for c in ["player_name", "team", "position", "est_woba", "woba", "xwoba_minus_woba", "hard_hit_percentile", "barrel_percentile"] if c in bh.columns]
-            fmt = {c: "{:.3f}" for c in show_cols if c not in ("player_name", "team", "position", "hard_hit_percentile", "barrel_percentile")}
-            fmt.update({c: "{:.0f}" for c in show_cols if c in ("hard_hit_percentile", "barrel_percentile")})
+            bh = _add_gp_week(bh)
+            show_cols = [c for c in ["player_name", "GP_week", "team", "position", "est_woba", "woba", "xwoba_minus_woba", "hard_hit_percentile", "barrel_percentile"] if c in bh.columns]
+            fmt = {c: "{:.3f}" for c in show_cols if c not in ("player_name", "GP_week", "team", "position", "hard_hit_percentile", "barrel_percentile")}
+            fmt.update({c: "{:.0f}" for c in show_cols if c in ("hard_hit_percentile", "barrel_percentile", "GP_week")})
             st.dataframe(bh[show_cols].head(10).style.format(fmt, na_rep="-"), use_container_width=True, hide_index=True)
 
     with col2:
@@ -532,9 +574,11 @@ def page_session_prep():
         bp = _load_csv(GOLD / "breakout_pitchers_fa.csv")
         if bp is not None:
             bp = _fill_fa_position(bp)
-            show_cols = [c for c in ["player_name", "team", "position", "xera", "era", "xera_minus_era", "k_percent", "barrel_percentile"] if c in bp.columns]
-            fmt = {c: "{:.2f}" for c in show_cols if c not in ("player_name", "team", "position", "k_percent", "barrel_percentile")}
+            bp = _add_gp_week(bp)
+            show_cols = [c for c in ["player_name", "GP_week", "team", "position", "xera", "era", "xera_minus_era", "k_percent", "barrel_percentile"] if c in bp.columns]
+            fmt = {c: "{:.2f}" for c in show_cols if c not in ("player_name", "GP_week", "team", "position", "k_percent", "barrel_percentile")}
             fmt.update({c: "{:.1f}" for c in show_cols if c in ("k_percent", "barrel_percentile")})
+            fmt.update({c: "{:.0f}" for c in show_cols if c in ("GP_week",)})
             st.dataframe(bp[show_cols].head(10).style.format(fmt, na_rep="-"), use_container_width=True, hide_index=True)
 
 
