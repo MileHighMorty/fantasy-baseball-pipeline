@@ -128,6 +128,22 @@ prospects:
     age: 22
     notes: ""
 
+  - name: JJ Wetherholt
+    player_id: 802139
+    team: STL
+    position: SS
+    level: Double-A
+    age: 23
+    notes: "Elite hit tool"
+
+  - name: Colson Montgomery
+    player_id: 695657
+    team: CWS
+    position: SS
+    level: Triple-A
+    age: 23
+    notes: ""
+
   # ── Pitchers ────────────────────────────────────────────────────────
   - name: Roki Sasaki
     player_id: 808967
