@@ -6,7 +6,7 @@ their surface-level results, suggesting positive regression ahead.
 Inputs:
     silver/data/statcast_hitters.parquet
     silver/data/statcast_pitchers.parquet
-    bronze/data/fantrax/all_rosters_*.csv (from dynasty-cap-manager)
+    bronze/data/fantrax/all_rosters_*.csv
 
 Outputs:
     gold/data/breakout_hitters_all.csv
@@ -24,9 +24,7 @@ from rapidfuzz import process, fuzz
 
 SILVER_DIR = pathlib.Path(__file__).resolve().parent.parent / "silver" / "data"
 GOLD_DIR = pathlib.Path(__file__).resolve().parent / "data"
-FANTRAX_DIR = (
-    pathlib.Path.home() / "projects" / "dynasty-cap-manager" / "bronze" / "data" / "fantrax"
-)
+FANTRAX_DIR = pathlib.Path(__file__).resolve().parent.parent / "bronze" / "data" / "fantrax"
 
 FUZZY_THRESHOLD = 90
 

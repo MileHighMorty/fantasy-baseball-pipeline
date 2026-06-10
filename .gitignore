@@ -7,3 +7,6 @@ gold/data/
 __pycache__/
 *.pyc
 fantraxloggedin.cookie
+
+scratch_*.py
+.claude/settings.local.json

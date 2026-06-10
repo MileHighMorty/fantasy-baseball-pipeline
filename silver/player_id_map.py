@@ -23,14 +23,7 @@ from rapidfuzz import fuzz, process
 
 BRONZE_DIR = pathlib.Path(__file__).resolve().parent.parent / "bronze" / "data"
 DATA_DIR = pathlib.Path(__file__).resolve().parent / "data"
-FANTRAX_DIR = (
-    pathlib.Path.home()
-    / "projects"
-    / "dynasty-cap-manager"
-    / "bronze"
-    / "data"
-    / "fantrax"
-)
+FANTRAX_DIR = pathlib.Path(__file__).resolve().parent.parent / "bronze" / "data" / "fantrax"
 
 MATCH_THRESHOLD = 90
 _PITCHER_POSITIONS = {"SP", "RP", "P"}

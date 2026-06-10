@@ -32,6 +32,9 @@ league:
     - WHIP
     - QS
 
+fantrax:
+  my_team_label: "Matt"
+
 data:
   bronze_path: bronze/data
   silver_path: silver/data

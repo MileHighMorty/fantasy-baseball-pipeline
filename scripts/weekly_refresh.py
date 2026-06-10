@@ -13,7 +13,7 @@ Usage:
 import argparse
 import sys
 import traceback
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 # ── paths ────────────────────────────────────────────────────────────
@@ -28,6 +28,9 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 SILVER_DATA = PROJECT_ROOT / "silver" / "data"
 GOLD_DATA = PROJECT_ROOT / "gold" / "data"
+FANTRAX_DATA = PROJECT_ROOT / "bronze" / "data" / "fantrax"
+
+FANTRAX_MAX_AGE_DAYS = 7
 
 
 # ── layer runners ────────────────────────────────────────────────────
@@ -57,12 +60,45 @@ def _run_module(module_name: str, import_path: str) -> bool:
         return False
 
 
+def check_fantrax_freshness() -> None:
+    """Warn loudly if the repo-local Fantrax roster export is missing or stale.
+
+    Fantrax data is fed by a manual export, so the pipeline cannot
+    refresh it.  This only warns — it never fails the pipeline.
+    """
+    files = sorted(FANTRAX_DATA.glob("all_rosters_*.csv"))
+    age_days: int | None = None
+    if files:
+        newest = files[-1]
+        try:
+            stamp = date.fromisoformat(newest.stem.removeprefix("all_rosters_"))
+        except ValueError:
+            stamp = date.fromtimestamp(newest.stat().st_mtime)
+        age_days = (date.today() - stamp).days
+
+    if files and age_days is not None and age_days <= FANTRAX_MAX_AGE_DAYS:
+        return
+
+    detail = (
+        "No Fantrax roster export found in bronze/data/fantrax!"
+        if not files
+        else f"Newest Fantrax roster export ({files[-1].name}) is {age_days} days old!"
+    )
+    print(f"\n{'!' * 60}")
+    print(f"  WARNING: {detail}")
+    print("  Roster-aware modules will use stale or missing ownership data.")
+    print("  Export the Players page CSV from Fantrax, then run:")
+    print("    python -m bronze.fantrax_csv_import --input <path-to-export.csv>")
+    print(f"{'!' * 60}")
+
+
 def run_bronze() -> dict[str, bool]:
     """Run all bronze-layer data clients.
 
     Returns:
         Dict mapping module name to success/failure boolean.
     """
+    check_fantrax_freshness()
     modules = [
         ("Savant Client", "bronze.savant_client"),
         ("FanGraphs Client", "bronze.fangraphs_client"),

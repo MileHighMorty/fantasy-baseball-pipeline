@@ -24,14 +24,7 @@ import pandas as pd
 
 SILVER_DIR = pathlib.Path(__file__).resolve().parent.parent / "silver" / "data"
 GOLD_DIR = pathlib.Path(__file__).resolve().parent / "data"
-FANTRAX_DIR = (
-    pathlib.Path.home()
-    / "projects"
-    / "dynasty-cap-manager"
-    / "bronze"
-    / "data"
-    / "fantrax"
-)
+FANTRAX_DIR = pathlib.Path(__file__).resolve().parent.parent / "bronze" / "data" / "fantrax"
 
 # ── constants ────────────────────────────────────────────────────────
 
