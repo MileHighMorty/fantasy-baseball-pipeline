@@ -33,6 +33,6 @@ def warn_if_stale_fangraphs(path: pathlib.Path) -> None:
     if age_days > MAX_AGE_DAYS:
         print(
             f"  WARNING: FanGraphs data ({path.name}) is {age_days} days old ({stamp}). "
-            "Match rates and scores using FanGraphs columns may be stale. "
-            "The FanGraphs client is currently failing (403)."
+            "Match rates and scores using FanGraphs columns may be stale; "
+            "refresh the FanGraphs pull."
         )
