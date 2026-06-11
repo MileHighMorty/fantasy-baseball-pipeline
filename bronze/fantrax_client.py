@@ -32,6 +32,7 @@ import requests
 import yaml
 from dotenv import load_dotenv
 from fantraxapi import FantraxAPI, NotLoggedIn
+from fantraxapi import api as fantrax_api
 
 # ── paths ────────────────────────────────────────────────────────────
 
@@ -112,27 +113,37 @@ def fetch_all_rosters(api: FantraxAPI) -> pd.DataFrame:
     Returns:
         DataFrame with :data:`OUTPUT_COLUMNS`, one row per owned player.
     """
+    # fantraxapi 1.0.1's Roster object also parses the SCHEDULE_FULL view and
+    # its Game parser crashes (IndexError) on schedule cells without a game
+    # time.  We only need the STATS view, so we take the raw response from the
+    # library's request layer and parse the roster rows ourselves.
     records = []
     for team in api.teams:
-        roster = api.team_roster(team.id)
-        for row in roster.rows:
-            if row.player is None:
-                continue
-            records.append({
-                "team_name": team.name,
-                "player_name": row.player.name,
-                "position": row.position.short_name,
-                "fantasy_points": (
-                    "" if row.total_fantasy_points is None else row.total_fantasy_points
-                ),
-                "points_per_game": (
-                    "" if row.fantasy_points_per_game is None else row.fantasy_points_per_game
-                ),
-                "fantrax_id": row.player.id,
-                "mlb_team": row.player.team_short_name,
-                "status": "owned",
-                "age": "",
-            })
+        stats = fantrax_api.get_team_roster_info(api, team.id)[0]
+        for table in stats["tables"]:
+            header = table["header"]["cells"]
+            for row in table["rows"]:
+                # Empty slots either have no scorer at all or a stub scorer
+                # dict with no player identity (seen on open MiLB slots).
+                scorer = row.get("scorer", {})
+                if "scorerId" not in scorer:
+                    continue
+                points = {"SCORE": "", "FPTS_PER_GAME": ""}
+                for head, cell in zip(header, row["cells"]):
+                    key = head.get("sortKey")
+                    if key in points and cell.get("content") not in (None, ""):
+                        points[key] = cell["content"]
+                records.append({
+                    "team_name": team.name,
+                    "player_name": scorer["name"],
+                    "position": api.positions[row["posId"]].short_name,
+                    "fantasy_points": points["SCORE"],
+                    "points_per_game": points["FPTS_PER_GAME"],
+                    "fantrax_id": scorer["scorerId"],
+                    "mlb_team": scorer.get("teamShortName", scorer.get("teamName", "")),
+                    "status": "owned",
+                    "age": "",
+                })
     return pd.DataFrame(records, columns=OUTPUT_COLUMNS)
 
 
