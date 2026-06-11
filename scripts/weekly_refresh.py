@@ -11,10 +11,13 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import traceback
 from datetime import date, datetime
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 # ── paths ────────────────────────────────────────────────────────────
 
@@ -60,6 +63,31 @@ def _run_module(module_name: str, import_path: str) -> bool:
         return False
 
 
+def attempt_fantrax_live_pull() -> None:
+    """Try a live Fantrax roster pull when FANTRAX_COOKIE is configured.
+
+    On success, today's roster files exist and the freshness check passes
+    naturally.  Any failure is printed and swallowed so the manual-CSV
+    fallback and the staleness warning still apply — the pipeline must
+    never die because the live pull failed.
+    """
+    load_dotenv(PROJECT_ROOT / ".env")
+    if not os.environ.get("FANTRAX_COOKIE", "").strip():
+        return
+    print(f"\n{'-' * 60}")
+    print("  FANTRAX_COOKIE found - attempting live Fantrax roster pull...")
+    print(f"{'-' * 60}")
+    try:
+        from bronze import fantrax_client
+
+        fantrax_client.run_live_pull(
+            os.environ["FANTRAX_COOKIE"].strip(), date.today().isoformat()
+        )
+    except Exception as e:
+        print(f"\n  Live Fantrax pull failed: {type(e).__name__}: {e}")
+        print("  Falling back to the manual CSV workflow.")
+
+
 def check_fantrax_freshness() -> None:
     """Warn loudly if the repo-local Fantrax roster export is missing or stale.
 
@@ -98,6 +126,7 @@ def run_bronze() -> dict[str, bool]:
     Returns:
         Dict mapping module name to success/failure boolean.
     """
+    attempt_fantrax_live_pull()
     check_fantrax_freshness()
     modules = [
         ("Savant Client", "bronze.savant_client"),

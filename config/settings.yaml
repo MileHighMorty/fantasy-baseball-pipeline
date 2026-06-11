@@ -33,7 +33,13 @@ league:
     - QS
 
 fantrax:
+  # Two identifiers for the same team, because the two bronze feeds name it
+  # differently: the manual Players-page export's Status column carries the
+  # owner label (my_team_label, used by fantrax_csv_import), while the live
+  # API returns the fantasy team name (my_team_name, used by fantrax_client).
   my_team_label: "Matt"
+  my_team_name: "Rutsch Hour"
+  league_id: "l20m69v3mgdwwo4u"
 
 data:
   bronze_path: bronze/data
