@@ -19,6 +19,8 @@ import unicodedata
 import pandas as pd
 from rapidfuzz import fuzz, process
 
+from silver.freshness import warn_if_stale_fangraphs
+
 # ── paths ──────────────────────────────────────────────────────────────
 
 BRONZE_DIR = pathlib.Path(__file__).resolve().parent.parent / "bronze" / "data"
@@ -153,6 +155,7 @@ def _load_fangraphs_players() -> pd.DataFrame:
         matches = sorted(fg_dir.glob(f"*_{stat_type}.csv"))
         if not matches:
             continue
+        warn_if_stale_fangraphs(matches[-1])
         df = pd.read_csv(matches[-1], usecols=["IDfg", "Name", "Team"])
         df = df.rename(columns={"IDfg": "fangraphs_id", "Name": "player_name", "Team": "fg_team"})
         frames.append(df)
