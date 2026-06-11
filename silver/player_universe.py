@@ -11,6 +11,8 @@ import unicodedata
 import pandas as pd
 from rapidfuzz import fuzz, process
 
+from silver.freshness import warn_if_stale_fangraphs
+
 BRONZE_DIR = pathlib.Path(__file__).resolve().parent.parent / "bronze" / "data"
 DATA_DIR = pathlib.Path(__file__).resolve().parent / "data"
 
@@ -100,12 +102,14 @@ def load_fangraphs_players() -> pd.DataFrame:
         ``[player_name, fangraphs_id, team, position, age]``.
     """
     bat_path = _latest_csv(BRONZE_DIR / "fangraphs", "batting")
+    warn_if_stale_fangraphs(bat_path)
     bat = pd.read_csv(bat_path, usecols=["IDfg", "Name", "Team", "Age"])
     bat = bat.rename(columns={"IDfg": "fangraphs_id", "Name": "player_name",
                               "Team": "team", "Age": "age"})
     bat["position"] = None
 
     pit_path = _latest_csv(BRONZE_DIR / "fangraphs", "pitching")
+    warn_if_stale_fangraphs(pit_path)
     pit = pd.read_csv(pit_path, usecols=["IDfg", "Name", "Team", "Age"])
     pit = pit.rename(columns={"IDfg": "fangraphs_id", "Name": "player_name",
                               "Team": "team", "Age": "age"})

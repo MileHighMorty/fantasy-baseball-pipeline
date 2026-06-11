@@ -24,6 +24,8 @@ import pathlib
 
 import pandas as pd
 
+from silver.freshness import warn_if_stale_fangraphs
+
 DATA_DIR = pathlib.Path(__file__).resolve().parent / "data"
 BRONZE_DIR = pathlib.Path(__file__).resolve().parent.parent / "bronze" / "data"
 
@@ -108,6 +110,7 @@ def load_fangraphs_batting() -> pd.DataFrame:
         DataFrame keyed by ``IDfg`` with the ``Spd`` (speed) column.
     """
     path = _latest_csv(BRONZE_DIR / "fangraphs", "batting")
+    warn_if_stale_fangraphs(path)
     return pd.read_csv(path, usecols=["IDfg", "Spd"])
 
 
@@ -118,6 +121,7 @@ def load_fangraphs_pitching() -> pd.DataFrame:
         DataFrame keyed by ``IDfg`` with ``K%``, ``K/9``, and ``BB%``.
     """
     path = _latest_csv(BRONZE_DIR / "fangraphs", "pitching")
+    warn_if_stale_fangraphs(path)
     return pd.read_csv(path, usecols=["IDfg", "K%", "K/9", "BB%"])
 
 
