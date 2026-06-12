@@ -1,8 +1,10 @@
 """Master player identity resolution for the fantasy baseball pipeline.
 
-Builds a single ID map that links every Fantrax roster player to their
-Baseball Savant and FanGraphs IDs via fuzzy name matching.  All other
-modules should use this map instead of doing their own matching.
+Builds a single ID map that links every Fantrax player — rostered, and
+the full free-agent pool when a free_agents bronze pull exists — to
+their Baseball Savant and FanGraphs IDs via fuzzy name matching.  All
+other modules should use this map instead of doing their own matching.
+Rows carry status 'owned' or 'fa'.
 
 Two-way players (e.g. Ohtani) who appear in Fantrax rosters as BOTH a
 hitter and a pitcher get TWO separate rows — one per player_type — and
@@ -190,10 +192,55 @@ def _load_fantrax_players() -> pd.DataFrame:
         lambda r: _make_fantrax_id(r["player_name"], r["player_type"]), axis=1
     )
     combined = combined.rename(columns={"team_name": "fantrax_team_name"})
+    combined["status"] = "owned"
 
     return combined[
-        ["fantrax_id", "player_name", "position", "player_type", "fantrax_team_name", "mlb_team"]
+        [
+            "fantrax_id", "player_name", "position", "player_type",
+            "fantrax_team_name", "mlb_team", "status",
+        ]
     ].reset_index(drop=True)
+
+
+def _player_type_from_position(position: str) -> str:
+    """Classify a (possibly multi-eligible) position string.
+
+    Free-agent rows can list several positions ("SP,RP", "1B,OF"): only a
+    pure pitching listing classifies as Pitcher, since any hitting
+    eligibility means the player's offensive row is the one worth matching.
+    """
+    tokens = [t.strip() for t in str(position).replace("/", ",").split(",") if t.strip()]
+    if tokens and all(t in _PITCHER_POSITIONS for t in tokens):
+        return "Pitcher"
+    return "Hitter"
+
+
+def _load_free_agents() -> pd.DataFrame:
+    """Load the latest free-agent pull shaped like the roster frame.
+
+    Returns an empty frame when no free_agents CSV exists (manual-import
+    workflows have no FA pull) — the matcher then runs roster-only.
+    Unlike roster rows, fantrax_id here is the real Fantrax scorerId
+    straight from the API, not a name-derived hash.
+    """
+    columns = [
+        "fantrax_id", "player_name", "position", "player_type",
+        "fantrax_team_name", "mlb_team", "status",
+    ]
+    fa_path = _latest_csv(FANTRAX_DIR, "free_agents")
+    if fa_path is None:
+        return pd.DataFrame(columns=columns)
+
+    df = pd.read_csv(fa_path)
+    df["player_name"] = df["player_name"].astype(str).str.strip()
+    df = df[(df["player_name"] != "") & (df["player_name"] != "nan")].copy()
+    df = df[df["status"] == "fa"]
+    df = df.drop_duplicates(subset=["fantrax_id"], keep="first")
+
+    df["player_type"] = df["position"].apply(_player_type_from_position)
+    df["fantrax_team_name"] = ""
+    df["mlb_team"] = df["mlb_team"].fillna("")
+    return df[columns].reset_index(drop=True)
 
 
 def _load_savant_players() -> pd.DataFrame:
@@ -263,20 +310,31 @@ def _load_fangraphs_players() -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True).reset_index(drop=True)
 
 
-def _load_overrides() -> dict[tuple[str, str, str], int]:
+def _load_overrides() -> dict[tuple[str, str, str], int | None]:
     """Load manual match overrides, creating an empty template if absent.
 
     overrides/player_name_overrides.csv holds human-confirmed resolutions
     for names the fuzzy matcher gets wrong (accents with middle initials,
-    nicknames).  An override FORCES the mapping for that player+source
-    regardless of fuzzy score and is marked match_class='override', so a
-    fix made once persists across every future run — the review queue
-    surfaces the miss, a human adds one CSV row, and the miss never
-    returns.
+    nicknames).  Two kinds of row, distinguished by source_id:
+
+    * a numeric source_id FORCES that mapping regardless of fuzzy score
+      (match_class='override');
+    * the literal "NONE" BLOCKS matching — this player has no counterpart
+      in that source no matter how well a name scores (match_class
+      'no_candidate'), which is how look-alike names that clear the match
+      threshold (e.g. FA "Stanly Alcantara" at 90.3 vs Sandy Alcantara)
+      are pinned down as different people.  source may be "all" (or "*")
+      to block every source with one row — the usual case, since a
+      non-entity is a non-entity everywhere.  Forcing with source=all is
+      rejected: a forced ID is inherently per-source.
+
+    Either way a fix made once persists across every future run — the
+    review queue surfaces the problem, a human adds one CSV row, and it
+    never returns.
 
     Returns:
-        {(normalized fantrax name, player_type, source): source_id}
-        where source is 'savant' or 'fangraphs'.
+        {(normalized fantrax name, player_type, source): source_id or None}
+        where source is 'savant' or 'fangraphs' and None means "blocked".
     """
     if not OVERRIDES_PATH.exists():
         OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -285,20 +343,30 @@ def _load_overrides() -> dict[tuple[str, str, str], int]:
         )
         return {}
 
-    df = pd.read_csv(OVERRIDES_PATH)
-    overrides: dict[tuple[str, str, str], int] = {}
+    # dtype=str + keep_default_na=False so the "NONE" sentinel (and any
+    # odd id) reaches us verbatim instead of becoming NaN.
+    df = pd.read_csv(OVERRIDES_PATH, dtype=str, keep_default_na=False)
+    overrides: dict[tuple[str, str, str], int | None] = {}
     for _, row in df.iterrows():
-        source = str(row["source"]).strip().lower()
-        if source not in ("savant", "fangraphs"):
+        source = row["source"].strip().lower()
+        raw_id = row["source_id"].strip()
+        blocked = raw_id.upper() == "NONE"
+        if source in ("all", "*"):
+            if not blocked:
+                print(f"  WARNING: override for {row['fantrax_name']} forces an ID "
+                      f"with source 'all' — a forced ID is per-source; skipped")
+                continue
+            targets: tuple[str, ...] = ("savant", "fangraphs")
+        elif source in ("savant", "fangraphs"):
+            targets = (source,)
+        else:
             print(f"  WARNING: override for {row['fantrax_name']} has unknown source "
                   f"'{row['source']}' — skipped")
             continue
-        key = (
-            _normalize_name(str(row["fantrax_name"])).lower(),
-            str(row["player_type"]).strip(),
-            source,
-        )
-        overrides[key] = int(row["source_id"])
+        name_key = _normalize_name(row["fantrax_name"]).lower()
+        player_type = row["player_type"].strip()
+        for target in targets:
+            overrides[(name_key, player_type, target)] = None if blocked else int(raw_id)
     return overrides
 
 
@@ -404,7 +472,8 @@ def build_player_id_map() -> tuple[pd.DataFrame, dict[str, int | None]]:
     Returns:
         A tuple of (id_map, savant_pa_floor) where id_map has columns:
         fantrax_id, player_name, team, position, player_type,
-        fantrax_team_name, savant_player_id, fangraphs_id, match_quality,
+        fantrax_team_name, status ('owned' or 'fa'),
+        savant_player_id, fangraphs_id, match_quality,
         savant_best_score, savant_best_candidate, savant_match_class,
         fangraphs_best_score, fangraphs_best_candidate,
         fangraphs_match_class — and savant_pa_floor maps player_type to
@@ -414,6 +483,26 @@ def build_player_id_map() -> tuple[pd.DataFrame, dict[str, int | None]]:
     print("Loading Fantrax rosters...")
     fantrax = _load_fantrax_players()
     print(f"  {len(fantrax)} Fantrax roster entries")
+
+    free_agents = _load_free_agents()
+    if not free_agents.empty:
+        # Roster wins on overlap: a player added since the FA snapshot
+        # must not appear twice with conflicting status.
+        owned_keys = {
+            (_normalize_name(n), t)
+            for n, t in zip(fantrax["player_name"], fantrax["player_type"])
+        }
+        before = len(free_agents)
+        keep = [
+            (_normalize_name(n), t) not in owned_keys
+            for n, t in zip(free_agents["player_name"], free_agents["player_type"])
+        ]
+        free_agents = free_agents[keep]
+        print(
+            f"  {len(free_agents)} free agents added to the match pool "
+            f"({before - len(free_agents)} dropped as roster overlap)"
+        )
+        fantrax = pd.concat([fantrax, free_agents], ignore_index=True)
 
     print("Loading Savant players...")
     savant = _load_savant_players()
@@ -463,11 +552,17 @@ def build_player_id_map() -> tuple[pd.DataFrame, dict[str, int | None]]:
             sav_sub, _ = sav_pools[player_type]
             savant_id = int(sav_sub.iloc[sav_idx]["savant_player_id"])
 
-        # Manual override outranks the fuzzy result for this player+source
-        sav_override = overrides.get((override_key, player_type, "savant"))
-        if sav_override is not None:
-            savant_id = sav_override
-            sav_class = "override"
+        # Manual override outranks the fuzzy result for this player+source:
+        # a numeric id forces the match, the None sentinel (CSV "NONE")
+        # blocks it — a confirmed different person despite the name score.
+        if (override_key, player_type, "savant") in overrides:
+            sav_override = overrides[(override_key, player_type, "savant")]
+            if sav_override is None:
+                savant_id = None
+                sav_class = "no_candidate"
+            else:
+                savant_id = sav_override
+                sav_class = "override"
 
         # --- Match to FanGraphs (type-correct pool, no cutoff) ---
         fg_score, fg_candidate, fg_idx = _best_match(
@@ -481,12 +576,17 @@ def build_player_id_map() -> tuple[pd.DataFrame, dict[str, int | None]]:
             fg_id = int(fg_sub.iloc[fg_idx]["fangraphs_id"])
             fg_team = fg_sub.iloc[fg_idx]["fg_team"]
 
-        fg_override = overrides.get((override_key, player_type, "fangraphs"))
-        if fg_override is not None:
-            fg_id = fg_override
-            fg_class = "override"
-            ov_row = fangraphs[fangraphs["fangraphs_id"] == fg_id]
-            fg_team = ov_row.iloc[0]["fg_team"] if not ov_row.empty else None
+        if (override_key, player_type, "fangraphs") in overrides:
+            fg_override = overrides[(override_key, player_type, "fangraphs")]
+            if fg_override is None:
+                fg_id = None
+                fg_team = None
+                fg_class = "no_candidate"
+            else:
+                fg_id = fg_override
+                fg_class = "override"
+                ov_row = fangraphs[fangraphs["fangraphs_id"] == fg_id]
+                fg_team = ov_row.iloc[0]["fg_team"] if not ov_row.empty else None
 
         # Overall match quality: best of the two sources (unchanged bands;
         # override ranks between exact and fuzzy — human-confirmed, but
@@ -513,6 +613,7 @@ def build_player_id_map() -> tuple[pd.DataFrame, dict[str, int | None]]:
             "position": ftx_row["position"],
             "player_type": player_type,
             "fantrax_team_name": ftx_row["fantrax_team_name"],
+            "status": ftx_row["status"],
             "savant_player_id": savant_id,
             "fangraphs_id": fg_id,
             "match_quality": match_quality,
@@ -573,13 +674,26 @@ def _write_review_queue(id_map: pd.DataFrame) -> None:
     rises to the top, while a player matched in one source and merely
     absent from the other sinks — their only unmatched score is the
     low no_candidate one.
+
+    Free agents enter the queue only on a fuzzy miss: listing every
+    minor leaguer absent from the MLB leaderboards (thousands of
+    no_candidate rows) would bury the actionable rows a human review
+    queue exists to surface.
     """
     review_classes = ("fuzzy_miss_high", "fuzzy_miss_low", "no_candidate")
-    queue = id_map.loc[
+    fuzzy_classes = ("fuzzy_miss_high", "fuzzy_miss_low")
+    owned_review = (id_map["status"] == "owned") & (
         id_map["savant_match_class"].isin(review_classes)
-        | id_map["fangraphs_match_class"].isin(review_classes),
+        | id_map["fangraphs_match_class"].isin(review_classes)
+    )
+    fa_review = (id_map["status"] == "fa") & (
+        id_map["savant_match_class"].isin(fuzzy_classes)
+        | id_map["fangraphs_match_class"].isin(fuzzy_classes)
+    )
+    queue = id_map.loc[
+        owned_review | fa_review,
         [
-            "player_name", "player_type", "fantrax_team_name",
+            "player_name", "player_type", "fantrax_team_name", "status",
             "savant_best_score", "savant_best_candidate", "savant_match_class",
             "fangraphs_best_score", "fangraphs_best_candidate", "fangraphs_match_class",
         ],
@@ -631,7 +745,11 @@ def _update_player_master(id_map: pd.DataFrame) -> pd.DataFrame:
     hitter and pitcher records are mastered separately — their shared
     MLBAM/FanGraphs ids must not collapse them into one row.  On a
     re-sighting, last_seen_date advances and newly resolved source IDs
-    fill in; first_seen_date and res_key never change.
+    fill in where missing; an ID already on the row is NEVER overwritten
+    (a borderline fuzzy false positive — e.g. FA "Stanly Alcantara"
+    scoring 90.3 against Sandy Alcantara — must not corrupt the real
+    player's row; corrections go through the override CSV).
+    first_seen_date and res_key never change.
     """
     today = date.today().isoformat()
 
@@ -692,7 +810,8 @@ def _update_player_master(id_map: pd.DataFrame) -> pd.DataFrame:
             rec = records[pos]
             rec["last_seen_date"] = today
             for col, val in ids.items():
-                if val is not None:
+                current = rec.get(col)
+                if val is not None and (current is None or pd.isna(current)):
                     rec[col] = val
             _index_record(pos)
 
@@ -848,7 +967,14 @@ def print_quality_report(
     The headline number is the MATCHABLE match rate — matches among
     players who actually have a counterpart row in the source — because
     the raw rate conflates matcher misses with genuine source absence.
+
+    The detailed sections cover rostered players only; free agents get a
+    summary block, since the FA pool is dominated by minor leaguers with
+    genuinely no leaderboard row (a flood of correct no_candidates).
     """
+    fa = id_map[id_map["status"] == "fa"]
+    id_map = id_map[id_map["status"] == "owned"]
+
     total = len(id_map)
     savant_matched = id_map["savant_player_id"].notna().sum()
     fg_matched = id_map["fangraphs_id"].notna().sum()
@@ -885,7 +1011,7 @@ def print_quality_report(
     print(f"\n{'=' * 60}")
     print("  Player ID Map — Quality Report")
     print(f"{'=' * 60}")
-    print(f"  Total Fantrax players:    {total}")
+    print(f"  Total rostered players:   {total}")
     print(f"  Matched to Savant:        {savant_matched} ({100 * savant_matched / total:.0f}%)")
     print(f"  Matched to FanGraphs:     {fg_matched} ({100 * fg_matched / total:.0f}%)")
     print(f"  Fully unmatched:          {len(unmatched)}")
@@ -917,6 +1043,21 @@ def print_quality_report(
         f"  fuzzy_miss_low={int(combined_buckets.get('fuzzy_miss_low', 0))}"
         f"  no_candidate={combined_no_cand}"
     )
+
+    if not fa.empty:
+        print(f"\n  -- Free agents (same matching pipeline, summarized) --")
+        print(f"  Pool size:                {len(fa)}")
+        for label, prefix in (("Savant", "savant"), ("FanGraphs", "fangraphs")):
+            classes = fa[f"{prefix}_match_class"]
+            fa_matched = int(classes.isin(("exact", "fuzzy", "override")).sum())
+            print(
+                f"  {label}: matched={fa_matched}"
+                f"  fuzzy_miss_high={int((classes == 'fuzzy_miss_high').sum())}"
+                f"  fuzzy_miss_low={int((classes == 'fuzzy_miss_low').sum())}"
+                f"  no_candidate={int((classes == 'no_candidate').sum())}"
+            )
+        print("  (a large no_candidate count is expected and correct — the FA")
+        print("   pool is mostly minor leaguers below the qualification floors)")
 
     if not two_way.empty:
         print(f"\n  Two-way player rows ({len(two_way)}) — each matched ONLY against")

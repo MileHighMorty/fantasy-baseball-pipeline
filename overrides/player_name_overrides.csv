@@ -1,3 +1,5 @@
 fantrax_name,player_type,source,source_id,note
 Jose Ferrer,Pitcher,savant,678606,"Savant lists him as 'José A. Ferrer' (accent + middle initial); fuzzy score 88 fell below the 90 threshold"
 Cam Schlittler,Pitcher,fangraphs,32095,"FanGraphs uses full first name 'Cameron Schlittler'; fuzzy score 87.5 fell below the 90 threshold"
+Joscar Hernandez,Hitter,all,NONE,"FA minor-leaguer, not a real MLB entity in any source (collided w/ Teoscar Hernandez)"
+Stanly Alcantara,Pitcher,all,NONE,"FA minor-leaguer, not a real MLB entity in any source (collided w/ Sandy Alcantara)"

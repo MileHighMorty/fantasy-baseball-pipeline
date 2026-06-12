@@ -88,6 +88,29 @@ def attempt_fantrax_live_pull() -> None:
         print("  Falling back to the manual CSV workflow.")
 
 
+def attempt_fantrax_fa_pull() -> None:
+    """Try a live free-agent pool pull when FANTRAX_COOKIE is configured.
+
+    Same contract as the roster pull: any failure is printed and
+    swallowed — the matching layer simply runs roster-only when no
+    free_agents file exists, so this must never kill the pipeline.
+    """
+    load_dotenv(PROJECT_ROOT / ".env")
+    cookie = os.environ.get("FANTRAX_COOKIE", "").strip()
+    if not cookie:
+        return
+    print(f"\n{'-' * 60}")
+    print("  Attempting live Fantrax free-agent pool pull...")
+    print(f"{'-' * 60}")
+    try:
+        from bronze import fantrax_client
+
+        fantrax_client.run_free_agent_pull(cookie, date.today().isoformat())
+    except Exception as e:
+        print(f"\n  Live free-agent pull failed: {type(e).__name__}: {e}")
+        print("  Continuing without a fresh free-agent pool.")
+
+
 def check_fantrax_freshness() -> None:
     """Warn loudly if the repo-local Fantrax roster export is missing or stale.
 
@@ -127,6 +150,7 @@ def run_bronze() -> dict[str, bool]:
         Dict mapping module name to success/failure boolean.
     """
     attempt_fantrax_live_pull()
+    attempt_fantrax_fa_pull()
     check_fantrax_freshness()
     modules = [
         ("Savant Client", "bronze.savant_client"),

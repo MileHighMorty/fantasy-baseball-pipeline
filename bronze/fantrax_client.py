@@ -10,6 +10,10 @@ owner labels (e.g. "Matt").  my_roster filtering therefore uses
 ``fantrax.my_team_name`` here and ``fantrax.my_team_label`` in the
 importer — see the comment in config/settings.yaml.
 
+Also pulls the full available-player pool (free agents) via the raw
+fxpa getPlayerStats endpoint — fantraxapi has no free-agent support, so
+that pull speaks to the endpoint directly with the same session cookie.
+
 Inputs:
     FANTRAX_COOKIE in .env (browser session cookie)
     config/settings.yaml (fantrax.league_id, fantrax.my_team_name)
@@ -17,14 +21,24 @@ Inputs:
 Outputs:
     bronze/data/fantrax/all_rosters_YYYY-MM-DD.csv
     bronze/data/fantrax/my_roster_YYYY-MM-DD.csv
+    bronze/data/fantrax/free_agents_YYYY-MM-DD.csv
 
 Usage:
-    python -m bronze.fantrax_client
+    python -m bronze.fantrax_client                 # roster pull
+    python -m bronze.fantrax_client --free-agents   # available-player pool
+
+The free-agent pull runs in weekly_refresh (the pipeline is a scheduled
+job, so its ~3 minutes of paginated calls — the server caps pagination
+at 50/page — is acceptable); the --free-agents flag also allows an
+ad-hoc standalone refresh.
 """
 
+import argparse
+import json
 import os
 import pathlib
 import sys
+import time
 from datetime import date
 
 import pandas as pd
@@ -48,9 +62,20 @@ OUTPUT_COLUMNS = [
     "points_per_game", "fantrax_id", "mlb_team", "status", "age",
 ]
 
+FA_OUTPUT_COLUMNS = [
+    "player_name", "position", "fantrax_id", "mlb_team", "status", "minors_eligible",
+]
+
 EXPECTED_TEAM_COUNT = 12
 ROSTER_MIN = 20
 ROSTER_MAX = 30
+
+FXPA_URL = "https://www.fantrax.com/fxpa/req"
+# The server caps page size at 50 no matter what is requested (probed with
+# 200); asking for more is harmless and future-proofs a raised cap.
+FA_PAGE_SIZE = 200
+FA_MAX_PAGES = 250          # safety valve; the ~9.5k pool is ~191 pages at 50/page
+FA_PAGE_SLEEP_SECONDS = 0.2  # be polite between paginated calls
 
 # Cloudflare rejects requests carrying the default python-requests UA.
 USER_AGENT = (
@@ -147,6 +172,127 @@ def fetch_all_rosters(api: FantraxAPI) -> pd.DataFrame:
     return pd.DataFrame(records, columns=OUTPUT_COLUMNS)
 
 
+# ── free agents ──────────────────────────────────────────────────────
+
+
+def _fxpa_player_stats_page(session: requests.Session, league_id: str, page_number: int) -> dict:
+    """Call the fxpa getPlayerStats endpoint for one page of the player pool."""
+    body = {
+        "msgs": [{
+            "method": "getPlayerStats",
+            "data": {
+                "reload": "1",
+                "pageNumber": str(page_number),
+                "maxResultsPerPage": str(FA_PAGE_SIZE),
+            },
+        }],
+        "uiv": 3,
+        "refUrl": f"https://www.fantrax.com/fantasy/league/{league_id}/players",
+        "dt": 2, "at": 0, "av": None, "tz": "America/Denver", "v": "183.1.3",
+    }
+    r = session.post(f"{FXPA_URL}?leagueId={league_id}", data=json.dumps(body), timeout=60)
+    r.raise_for_status()
+    return r.json()["responses"][0]["data"]
+
+
+def _name_from_url_slug(slug: str, fallback: str) -> str:
+    """Reconstruct a full player name from the Fantrax URL slug.
+
+    The players-list scorer object only carries abbreviated names
+    ("K. Kelly"), which would wreck downstream fuzzy matching; the slug
+    ("kevin-kelly") preserves the full name, minus case and accents —
+    both of which the matcher's normalization discards anyway.
+    """
+    if not slug:
+        return fallback
+    return " ".join(part.capitalize() for part in slug.split("-"))
+
+
+def fetch_free_agents(session: requests.Session, league_id: str) -> pd.DataFrame:
+    """Pull the full available-player pool via paginated getPlayerStats.
+
+    The endpoint's default view is ALL_AVAILABLE (free agents); the status
+    cell is read anyway, so any row showing a fantasy team instead of "FA"
+    is tagged "owned" rather than trusted blindly.
+
+    Returns:
+        DataFrame with :data:`FA_OUTPUT_COLUMNS`, one row per player.
+    """
+    records = []
+    seen_ids: set[str] = set()
+    page = 1
+    total_pages = 1
+    while page <= total_pages and page <= FA_MAX_PAGES:
+        data = _fxpa_player_stats_page(session, league_id, page)
+        paging = data.get("paginatedResultSet", {})
+        total_pages = int(paging.get("totalNumPages", 1))
+        if page == 1:
+            print(
+                f"  Player pool: {paging.get('totalNumResults', '?')} players across "
+                f"{total_pages} pages ({paging.get('maxResultsPerPage', '?')}/page)"
+            )
+            if total_pages > FA_MAX_PAGES:
+                print(
+                    f"  WARNING: {total_pages} pages exceeds the safety cap of "
+                    f"{FA_MAX_PAGES}; pulling the first {FA_MAX_PAGES} pages only"
+                )
+        for row in data.get("statsTable", []):
+            scorer = row.get("scorer", {})
+            scorer_id = scorer.get("scorerId")
+            # The pool can shift between paginated calls; dedupe on scorerId
+            if not scorer_id or scorer_id in seen_ids:
+                continue
+            seen_ids.add(scorer_id)
+            cells = row.get("cells", [])
+            # Cell 1 is the status column: "FA" when available, a fantasy
+            # team name when owned (verified in the endpoint spike).
+            raw_status = cells[1].get("content", "") if len(cells) > 1 else ""
+            records.append({
+                "player_name": _name_from_url_slug(
+                    scorer.get("urlName", ""), scorer.get("name", "")
+                ),
+                "position": scorer.get("posShortNames", ""),
+                "fantrax_id": scorer_id,
+                "mlb_team": scorer.get("teamShortName", ""),
+                "status": "fa" if raw_status == "FA" else "owned",
+                "minors_eligible": bool(scorer.get("minorsEligible", False)),
+            })
+        page += 1
+        if page <= total_pages:
+            time.sleep(FA_PAGE_SLEEP_SECONDS)
+    return pd.DataFrame(records, columns=FA_OUTPUT_COLUMNS)
+
+
+def run_free_agent_pull(cookie: str, stamp: str) -> pathlib.Path:
+    """Pull the available-player pool and write free_agents_<stamp>.csv.
+
+    Args:
+        cookie: Browser session cookie for fantrax.com.
+        stamp: ISO date string used in the output filename.
+
+    Returns:
+        Path to the CSV that was written.
+    """
+    league_id, _ = load_fantrax_config()
+    print(f"Pulling free-agent pool for league {league_id}")
+    session = build_session(cookie)
+    session.headers.update({"Content-Type": "application/json"})
+
+    started = time.monotonic()
+    free_agents = fetch_free_agents(session, league_id)
+    elapsed = time.monotonic() - started
+
+    FANTRAX_DIR.mkdir(parents=True, exist_ok=True)
+    path = FANTRAX_DIR / f"free_agents_{stamp}.csv"
+    free_agents.to_csv(path, index=False, encoding="utf-8")
+    available = int((free_agents["status"] == "fa").sum())
+    print(
+        f"  Wrote {path} ({len(free_agents)} rows, {available} available) "
+        f"in {elapsed:.0f}s"
+    )
+    return path
+
+
 # ── validation warnings / summary ────────────────────────────────────
 
 
@@ -228,22 +374,33 @@ def run_live_pull(cookie: str, stamp: str) -> tuple[pathlib.Path, pathlib.Path]:
 
 
 def main() -> None:
-    """CLI entry point: pull live rosters using FANTRAX_COOKIE from .env."""
+    """CLI entry point: pull rosters (default) or the free-agent pool."""
     # Team names can contain emoji a cp1252 Windows console can't encode.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
+
+    parser = argparse.ArgumentParser(description="Live Fantrax bronze pulls")
+    parser.add_argument(
+        "--free-agents",
+        action="store_true",
+        help="pull the full available-player pool instead of team rosters",
+    )
+    args = parser.parse_args()
 
     load_dotenv(ENV_PATH)
     cookie = os.environ.get("FANTRAX_COOKIE", "").strip()
     if not cookie:
         print(
             "FANTRAX_COOKIE is missing or empty - add your browser session "
-            "cookie to .env (see .env.example) to enable live roster pulls."
+            "cookie to .env (see .env.example) to enable live pulls."
         )
         sys.exit(1)
 
     try:
-        run_live_pull(cookie, date.today().isoformat())
+        if args.free_agents:
+            run_free_agent_pull(cookie, date.today().isoformat())
+        else:
+            run_live_pull(cookie, date.today().isoformat())
     except NotLoggedIn:
         print("Fantrax cookie expired or invalid - refresh FANTRAX_COOKIE in .env")
         sys.exit(1)
