@@ -6,6 +6,7 @@ gold/data/
 *.duckdb
 __pycache__/
 *.pyc
+.pytest_cache/
 fantraxloggedin.cookie
 
 scratch_*.py

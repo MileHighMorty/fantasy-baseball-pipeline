@@ -462,6 +462,38 @@ def _classify_score(score: float) -> str:
     return "no_candidate"
 
 
+def _apply_override(
+    overrides: dict[tuple[str, str, str], int | None],
+    fantrax_name: str,
+    player_type: str,
+    source: str,
+    fuzzy_id: int | None,
+    fuzzy_class: str,
+) -> tuple[int | None, str]:
+    """Apply a manual override on top of a fuzzy-match result.
+
+    Pure decision function: given the loaded overrides and the fuzzy
+    outcome for one player+source, return the final (resolved_id,
+    match_class).  Three cases:
+
+    * force-match: a numeric override id wins regardless of fuzzy score
+      -> (override_id, 'override')
+    * block: a None override (CSV source_id "NONE"; source 'all' rows
+      are expanded per-source at load time) means this player matches
+      nothing here no matter how well a name scores
+      -> (None, 'no_candidate')
+    * pass-through: no override for this player+source
+      -> the fuzzy result unchanged
+    """
+    key = (_normalize_name(fantrax_name).lower(), player_type, source)
+    if key not in overrides:
+        return fuzzy_id, fuzzy_class
+    forced = overrides[key]
+    if forced is None:
+        return None, "no_candidate"
+    return forced, "override"
+
+
 def build_player_id_map() -> tuple[pd.DataFrame, dict[str, int | None]]:
     """Build the master player ID map.
 
@@ -539,7 +571,6 @@ def build_player_id_map() -> tuple[pd.DataFrame, dict[str, int | None]]:
         name = ftx_row["player_name"]
         player_type = ftx_row["player_type"]
         name_norm = _normalize_name(name)
-        override_key = name_norm.lower()
         mlb_team = ftx_row["mlb_team"] if pd.notna(ftx_row["mlb_team"]) else None
 
         # --- Match to Savant (type-correct pool, no cutoff) ---
@@ -552,17 +583,10 @@ def build_player_id_map() -> tuple[pd.DataFrame, dict[str, int | None]]:
             sav_sub, _ = sav_pools[player_type]
             savant_id = int(sav_sub.iloc[sav_idx]["savant_player_id"])
 
-        # Manual override outranks the fuzzy result for this player+source:
-        # a numeric id forces the match, the None sentinel (CSV "NONE")
-        # blocks it — a confirmed different person despite the name score.
-        if (override_key, player_type, "savant") in overrides:
-            sav_override = overrides[(override_key, player_type, "savant")]
-            if sav_override is None:
-                savant_id = None
-                sav_class = "no_candidate"
-            else:
-                savant_id = sav_override
-                sav_class = "override"
+        # Manual override outranks the fuzzy result for this player+source
+        savant_id, sav_class = _apply_override(
+            overrides, name, player_type, "savant", savant_id, sav_class
+        )
 
         # --- Match to FanGraphs (type-correct pool, no cutoff) ---
         fg_score, fg_candidate, fg_idx = _best_match(
@@ -576,17 +600,15 @@ def build_player_id_map() -> tuple[pd.DataFrame, dict[str, int | None]]:
             fg_id = int(fg_sub.iloc[fg_idx]["fangraphs_id"])
             fg_team = fg_sub.iloc[fg_idx]["fg_team"]
 
-        if (override_key, player_type, "fangraphs") in overrides:
-            fg_override = overrides[(override_key, player_type, "fangraphs")]
-            if fg_override is None:
-                fg_id = None
-                fg_team = None
-                fg_class = "no_candidate"
-            else:
-                fg_id = fg_override
-                fg_class = "override"
-                ov_row = fangraphs[fangraphs["fangraphs_id"] == fg_id]
-                fg_team = ov_row.iloc[0]["fg_team"] if not ov_row.empty else None
+        fg_id, fg_class = _apply_override(
+            overrides, name, player_type, "fangraphs", fg_id, fg_class
+        )
+        if fg_class == "override":
+            # A forced FanGraphs id needs its team looked up directly
+            ov_row = fangraphs[fangraphs["fangraphs_id"] == fg_id]
+            fg_team = ov_row.iloc[0]["fg_team"] if not ov_row.empty else None
+        elif fg_id is None:
+            fg_team = None
 
         # Overall match quality: best of the two sources (unchanged bands;
         # override ranks between exact and fuzzy — human-confirmed, but

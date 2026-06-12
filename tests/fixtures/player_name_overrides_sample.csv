@@ -1,0 +1,5 @@
+fantrax_name,player_type,source,source_id,note
+Jose Ferrer,Pitcher,savant,678606,force-match example
+Stanly Alcantara,Pitcher,all,NONE,block-all example
+Bad Row,Hitter,mystery,5,unknown source - must be skipped
+All Force,Hitter,all,123,force with source=all - must be rejected
