@@ -22,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 GOLD = PROJECT_ROOT / "gold" / "data"
 SILVER = PROJECT_ROOT / "silver" / "data"
 FANGRAPHS = PROJECT_ROOT / "bronze" / "data" / "fangraphs"
-FANTRAX = Path.home() / "projects" / "dynasty-cap-manager" / "bronze" / "data" / "fantrax"
+FANTRAX = PROJECT_ROOT / "bronze" / "data" / "fantrax"
 MY_TEAM = "Rutsch Hour"
 FUZZY_THRESHOLD = 85
 
@@ -614,9 +614,9 @@ def page_session_prep():
 def _breakout_style_maps():
     """Return shared color/symbol/opacity maps for breakout charts."""
     _LEAGUE_TEAMS = [
-        "Ben", "Chad", "George", "J-Rod Show", "Jorp", "Luke",
-        "Mullets", "Negs", "One Pathetic Luzar", "Porter",
-        "Professor McGonigle", "Rutsch Hour",
+        "Ben", "Chad", "George", "J-Rod Show", "Jorp", "Mullets",
+        "Negs", "One Pathetic Luzar", "Porter",
+        "Professor McGonigle", "Rutsch Hour", "Young Gunz",
     ]
     _TEAM_COLORS = [
         "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c", "#3498db",
@@ -641,12 +641,37 @@ def _add_ownership(df: pd.DataFrame) -> pd.DataFrame:
     # Try ID map first for ownership lookup
     id_map = _load_id_map()
     if id_map is not None:
-        ownership_lookup = id_map[["player_name", "fantrax_team_name"]].drop_duplicates(
-            subset=["player_name"], keep="first"
+        lookup_cols = ["player_name", "fantrax_team_name"]
+        has_status = "status" in id_map.columns
+        if has_status:
+            lookup_cols.append("status")
+        ownership_lookup = id_map[lookup_cols].rename(
+            columns={"status": "idmap_status"}
         )
+        # Statcast frames use plain source names; strip Fantrax's two-way
+        # role suffix ("Shohei Ohtani-P") so those rows can join.
+        ownership_lookup = ownership_lookup.assign(
+            player_name=ownership_lookup["player_name"].str.replace(
+                r"-[HP]$", "", regex=True
+            )
+        ).drop_duplicates(subset=["player_name"], keep="first")
+
         merged = df.merge(ownership_lookup, on="player_name", how="left")
-        merged["status"] = merged["fantrax_team_name"].fillna("FA")
-        df["status"] = merged["status"].values
+        if has_status:
+            # The id_map's own status column is the ownership signal:
+            # 'owned' rows show the owning fantasy team, everything else
+            # (status 'fa' or no id_map row at all) is a free agent.
+            df["status"] = np.where(
+                merged["idmap_status"] == "owned",
+                merged["fantrax_team_name"],
+                "FA",
+            )
+        else:
+            # Older id_map without a status column: FA rows carry
+            # empty-string team names, which fillna alone would miss.
+            df["status"] = (
+                merged["fantrax_team_name"].replace("", np.nan).fillna("FA").values
+            )
         return df
 
     # Fallback: all_rosters
