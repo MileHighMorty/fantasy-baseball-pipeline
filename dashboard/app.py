@@ -547,6 +547,11 @@ def page_session_prep():
             for col in ("team", "position"):
                 if col not in df.columns:
                     df[col] = None
+                elif df[col].dtype != object:
+                    # A column read entirely empty from CSV infers as float64;
+                    # pandas 3.0 refuses to assign a string into it. Coerce to
+                    # object so the fill below works regardless of source dtype.
+                    df[col] = df[col].astype(object)
                 missing = df[col].isna() | (df[col].astype(str).isin(["None", ""]))
                 if missing.any():
                     fill = df.loc[missing].merge(
@@ -561,6 +566,8 @@ def page_session_prep():
         for col_to_fill, fg_col in [("position", "fg_position"), ("team", "fg_team")]:
             if col_to_fill not in df.columns:
                 df[col_to_fill] = None
+            elif df[col_to_fill].dtype != object:
+                df[col_to_fill] = df[col_to_fill].astype(object)
             missing = df[col_to_fill].isna() | (df[col_to_fill].astype(str).isin(["None", ""]))
             if not missing.any() or fg_lookup.empty:
                 continue

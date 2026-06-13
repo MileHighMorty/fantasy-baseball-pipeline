@@ -4,13 +4,18 @@ For each rostered position, identifies the weakest player by composite score
 and compares against the best available free agents.  A swap is flagged when
 the FA's composite score exceeds the roster player by 10+ percentile points.
 
+Availability comes from resolved identity, not names: the full Statcast
+population is scored once (so roster and FA composites share one percentile
+basis) and ``status`` 'owned'/'fa' is attached from the silver ID map by
+vendor id.  The add pool is everyone with ``status == "fa"`` — which
+permanently excludes rostered two-way players (Ohtani's "-H"/"-P" Fantrax
+rows) and the accent-mismatch class of name-matching bugs.
+
 Inputs:
     bronze/data/fantrax/my_roster_*.csv
-    bronze/data/fantrax/all_rosters_*.csv
-    gold/data/waiver_hitters_ranked.csv
-    gold/data/waiver_pitchers_ranked.csv
     silver/data/statcast_hitters.parquet
     silver/data/statcast_pitchers.parquet
+    silver/data/player_id_map.parquet   (ownership: status owned/fa)
 
 Outputs:
     gold/data/add_drop_suggestions.csv
@@ -19,6 +24,9 @@ Outputs:
 import pathlib
 
 import pandas as pd
+
+from gold import waiver_ranker
+from gold.ownership import attach_status
 
 # ── paths ────────────────────────────────────────────────────────────
 
@@ -76,38 +84,34 @@ def load_my_roster() -> pd.DataFrame:
     return df[["player_name", "position"]]
 
 
-def load_owned_players() -> set[str]:
-    """Load all owned player names across all Fantrax teams.
+def load_scored_hitters() -> pd.DataFrame:
+    """Score the full Statcast hitter population and attach ownership.
+
+    Scoring runs over every hitter (not the FA-only waiver pool) so roster
+    and free-agent composites share one percentile basis and remain
+    comparable for the upgrade-threshold check.  ``status`` is then
+    attached by vendor id from the silver ID map.
 
     Returns:
-        Set of player names that are rostered by any team.
+        DataFrame with composite_hitter_score, Statcast metrics, and a
+        ``status`` column ('owned'/'fa', or <NA> when unresolved).
     """
-    df = _latest_fantrax("all_rosters")
-    if df is None:
-        return set()
-    return set(
-        df.loc[df["player_name"].notna() & (df["player_name"] != "None"),
-               "player_name"]
-        .str.strip()
-    )
+    df = pd.read_parquet(SILVER_DIR / "statcast_hitters.parquet")
+    return attach_status(waiver_ranker.score_hitters(df))
 
 
-def load_waiver_hitters() -> pd.DataFrame:
-    """Load ranked waiver hitters from the gold layer.
+def load_scored_pitchers() -> pd.DataFrame:
+    """Score the full Statcast pitcher population and attach ownership.
+
+    Same one-population scoring as :func:`load_scored_hitters` so roster and
+    FA pitcher composites stay comparable.
 
     Returns:
-        DataFrame with composite_hitter_score and Statcast metrics.
+        DataFrame with composite_pitcher_score, Statcast metrics, and a
+        ``status`` column ('owned'/'fa', or <NA> when unresolved).
     """
-    return pd.read_csv(GOLD_DIR / "waiver_hitters_ranked.csv")
-
-
-def load_waiver_pitchers() -> pd.DataFrame:
-    """Load ranked waiver pitchers from the gold layer.
-
-    Returns:
-        DataFrame with composite_pitcher_score and Statcast metrics.
-    """
-    return pd.read_csv(GOLD_DIR / "waiver_pitchers_ranked.csv")
+    df = pd.read_parquet(SILVER_DIR / "statcast_pitchers.parquet")
+    return attach_status(waiver_ranker.score_pitchers(df))
 
 
 # ── engine ───────────────────────────────────────────────────────────
@@ -141,7 +145,6 @@ def find_suggestions(
     my_roster: pd.DataFrame,
     waiver_hitters: pd.DataFrame,
     waiver_pitchers: pd.DataFrame,
-    owned_players: set[str],
 ) -> pd.DataFrame:
     """Compare roster weaknesses against free-agent upgrades by position.
 
@@ -150,11 +153,16 @@ def find_suggestions(
     composite score exceeds the roster player's by at least
     ``UPGRADE_THRESHOLD`` percentile points.
 
+    The add pool is drawn from ``status == "fa"`` rather than a name-based
+    exclusion of owned players, so resolved-but-rostered players (Ohtani's
+    two-way "-H"/"-P" rows, accented names) can never appear as adds.
+
     Args:
         my_roster: DataFrame with ``player_name`` and ``position``.
-        waiver_hitters: Ranked hitter DataFrame with composite scores.
-        waiver_pitchers: Ranked pitcher DataFrame with composite scores.
-        owned_players: Set of all rostered player names across the league.
+        waiver_hitters: Scored hitter DataFrame with composite scores and a
+            ``status`` column.
+        waiver_pitchers: Scored pitcher DataFrame with composite scores and a
+            ``status`` column.
 
     Returns:
         DataFrame of suggested add/drop moves.
@@ -185,9 +193,10 @@ def find_suggestions(
         drop_gap = weakest.get(gap_col, 0.0)
         drop_age = weakest.get("age", None)
 
-        # Free agents at this position (not owned by anyone)
-        fa_pool = waiver_df[~waiver_df["player_name"].isin(owned_players)].copy()
-        # For hitters, match position; pitchers are already filtered by file
+        # Free agents at this position — availability is the resolved
+        # ownership status, never a name match.
+        fa_pool = waiver_df[waiver_df["status"] == "fa"].copy()
+        # For hitters, match position; pitchers are already a pitcher pool
         if not is_pitcher and "position" in fa_pool.columns:
             fa_pool = fa_pool[fa_pool["position"] == pos]
 
@@ -271,17 +280,20 @@ def main() -> None:
     my_roster = load_my_roster()
     print(f"  {len(my_roster)} players on roster")
 
-    print("Loading owned players...")
-    owned_players = load_owned_players()
-    print(f"  {len(owned_players)} players owned across the league")
-
-    print("Loading waiver rankings...")
-    waiver_h = load_waiver_hitters()
-    waiver_p = load_waiver_pitchers()
-    print(f"  {len(waiver_h)} hitters, {len(waiver_p)} pitchers ranked")
+    print("Scoring full player pool and attaching ownership...")
+    waiver_h = load_scored_hitters()
+    waiver_p = load_scored_pitchers()
+    fa_h = int((waiver_h["status"] == "fa").sum())
+    fa_p = int((waiver_p["status"] == "fa").sum())
+    no_idmap = int(waiver_h["status"].isna().sum() + waiver_p["status"].isna().sum())
+    print(
+        f"  {len(waiver_h)} hitters, {len(waiver_p)} pitchers scored "
+        f"({fa_h} FA hitters, {fa_p} FA pitchers; "
+        f"{no_idmap} with no id_map row)"
+    )
 
     print("Finding add/drop suggestions...")
-    suggestions = find_suggestions(my_roster, waiver_h, waiver_p, owned_players)
+    suggestions = find_suggestions(my_roster, waiver_h, waiver_p)
 
     if not suggestions.empty:
         print(f"\n  {len(suggestions)} suggested moves:\n")

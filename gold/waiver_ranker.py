@@ -4,9 +4,15 @@ Scores hitters on HR, RBI, R, SB, OBP category contribution and pitchers
 on K, W, ERA, WHIP contribution (SVH is punted).  Players are ranked by
 a weighted composite score so the best waiver pickups float to the top.
 
+Only genuine free agents are ranked: the Statcast population is filtered
+to ``status == "fa"`` via the silver ID map (resolved vendor ids, not
+names) before scoring, so a rostered player can never surface as a waiver
+target.  Ranks are therefore percentiles within the available pool.
+
 Inputs:
     silver/data/statcast_hitters.parquet
     silver/data/statcast_pitchers.parquet
+    silver/data/player_id_map.parquet   (ownership: status owned/fa)
 
 Outputs:
     gold/data/waiver_hitters_ranked.csv
@@ -16,6 +22,8 @@ Outputs:
 import pathlib
 
 import pandas as pd
+
+from gold.ownership import available_players
 
 # ── paths ────────────────────────────────────────────────────────────
 
@@ -250,6 +258,8 @@ def main() -> None:
     hitters = load_hitters()
     print(f"  {len(hitters)} hitters loaded")
 
+    hitters = available_players(hitters, "hitters")
+
     print("Scoring hitters...")
     ranked_h = score_hitters(hitters)
     print(f"  Top {TOP_N} waiver hitters:\n")
@@ -260,6 +270,8 @@ def main() -> None:
     print("Loading silver-layer pitcher data...")
     pitchers = load_pitchers()
     print(f"  {len(pitchers)} pitchers loaded")
+
+    pitchers = available_players(pitchers, "pitchers")
 
     print("Scoring pitchers...")
     ranked_p = score_pitchers(pitchers)

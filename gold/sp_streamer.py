@@ -5,8 +5,14 @@ pitcher quality metrics (xERA, K%) with opponent offensive weakness
 (wRC+, K%).  Pitchers are ranked by a weighted stream_score so the
 best single-day spot starts float to the top.
 
+Only pitchers you can actually add are scored: scheduled starters are
+filtered to ``status == "fa"`` via the silver ID map (resolved vendor ids,
+not names) before scoring — a streamer you cannot pick up is not a
+streamer.
+
 Inputs:
     silver/data/statcast_pitchers.parquet
+    silver/data/player_id_map.parquet   (ownership: status owned/fa)
     bronze/data/mlb/{today}_games.csv
     bronze/data/fangraphs/{today}_batting.csv
 
@@ -18,6 +24,8 @@ import datetime
 import pathlib
 
 import pandas as pd
+
+from gold.ownership import available_players
 
 # ── paths ────────────────────────────────────────────────────────────
 
@@ -196,9 +204,12 @@ def score_streamers(
     Returns:
         Scored DataFrame sorted by ``stream_score`` descending.
     """
-    # Join pitcher quality metrics
+    # Join pitcher quality metrics (carry vendor ids for the ownership join)
     merged = matchups.merge(
-        pitchers[["player_name", "team", "xera", "k_percent"]],
+        pitchers[
+            ["player_name", "team", "savant_player_id", "fangraphs_id",
+             "xera", "k_percent"]
+        ],
         left_on=["pitcher_name", "team"],
         right_on=["player_name", "team"],
         how="left",
@@ -209,6 +220,14 @@ def score_streamers(
 
     if merged.empty:
         return merged
+
+    # Keep only addable arms — a streamer you can't roster isn't a streamer.
+    # Filtering before scoring makes the percentile ranks relative to the
+    # available pool.
+    merged = available_players(merged, "streamers")
+    if merged.empty:
+        return merged
+    merged = merged.drop(columns=["savant_player_id", "fangraphs_id"])
 
     # xERA score — lower is better
     merged["xera_score"] = (
