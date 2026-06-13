@@ -143,16 +143,17 @@ def build_matchups(games: pd.DataFrame) -> pd.DataFrame:
     """Unpivot the games schedule into one row per pitcher start.
 
     Each game has an away and a home probable pitcher.  This function
-    produces a flat table with columns ``pitcher_name``, ``team`` (the
-    pitcher's team abbreviation), and ``opponent`` (the opposing team
-    abbreviation).
+    produces a flat table with columns ``pitcher_id`` (the MLBAM id, used
+    to resolve the pitcher's Statcast row), ``pitcher_name`` and ``team``
+    (kept for display), and ``opponent`` (the opposing team abbreviation).
 
     Args:
         games: Raw games DataFrame from :func:`load_games`.
 
     Returns:
-        DataFrame with ``pitcher_name``, ``team``, ``opponent``, and
-        ``venue`` columns.
+        DataFrame with ``pitcher_id``, ``pitcher_name``, ``team``,
+        ``opponent``, and ``venue`` columns.  ``pitcher_id`` is null for a
+        still-TBD starter, which simply will not resolve downstream.
     """
     rows = []
     for _, g in games.iterrows():
@@ -161,6 +162,7 @@ def build_matchups(games: pd.DataFrame) -> pd.DataFrame:
 
         if pd.notna(g.get("away_pitcher")) and g["away_pitcher"]:
             rows.append({
+                "pitcher_id": g.get("away_pitcher_id"),
                 "pitcher_name": g["away_pitcher"],
                 "team": away_abbrev,
                 "opponent": home_abbrev,
@@ -168,6 +170,7 @@ def build_matchups(games: pd.DataFrame) -> pd.DataFrame:
             })
         if pd.notna(g.get("home_pitcher")) and g["home_pitcher"]:
             rows.append({
+                "pitcher_id": g.get("home_pitcher_id"),
                 "pitcher_name": g["home_pitcher"],
                 "team": home_abbrev,
                 "opponent": away_abbrev,
@@ -204,18 +207,32 @@ def score_streamers(
     Returns:
         Scored DataFrame sorted by ``stream_score`` descending.
     """
-    # Join pitcher quality metrics (carry vendor ids for the ownership join)
+    # Resolve each probable starter by identity, not by name: the MLB Stats
+    # MLBAM id is the same key as savant_player_id, so this is a direct id join
+    # with no fuzzy matching, immune to accents, "Jr." punctuation, and stale
+    # team abbreviations that a name+team string match would drop. Both keys are
+    # coerced to nullable Int64 so a TBD probable (null id) and the int statcast
+    # ids compare cleanly. Name/team are kept from the matchup for display only.
+    matchups = matchups.copy()
+    matchups["pitcher_id"] = pd.array(
+        pd.to_numeric(matchups.get("pitcher_id"), errors="coerce"), dtype="Int64"
+    )
+    pitchers = pitchers.copy()
+    pitchers["savant_player_id"] = pd.array(
+        pd.to_numeric(pitchers["savant_player_id"], errors="coerce"), dtype="Int64"
+    )
     merged = matchups.merge(
         pitchers[
-            ["player_name", "team", "savant_player_id", "fangraphs_id",
-             "xera", "k_percent"]
+            ["player_name", "savant_player_id", "fangraphs_id", "xera", "k_percent"]
         ],
-        left_on=["pitcher_name", "team"],
-        right_on=["player_name", "team"],
+        left_on="pitcher_id",
+        right_on="savant_player_id",
         how="left",
     )
 
-    # Drop pitchers without statcast data
+    # Drop pitchers that did not resolve to a Statcast row. With an id join this
+    # is an identity reason (no MLBAM id, or that arm is absent from the enriched
+    # table), never a name/team spelling mismatch.
     merged = merged.dropna(subset=["xera"]).copy()
 
     if merged.empty:

@@ -61,7 +61,11 @@ def get_todays_games(game_date: date | None = None) -> pd.DataFrame:
 
     Returns:
         DataFrame with columns: game_id, away_team, home_team,
-        away_pitcher, home_pitcher, game_time, status, venue.
+        away_pitcher, away_pitcher_id, home_pitcher, home_pitcher_id,
+        game_time, status, venue. The ``*_pitcher_id`` columns are MLBAM
+        person ids (the same key space as Savant's ``player_id``), so
+        downstream joins can resolve a probable starter by id instead of
+        by name. They are null when the probable pitcher is still TBD.
     """
     game_date = game_date or date.today()
     data = _get_json("/schedule", params={
@@ -75,12 +79,18 @@ def get_todays_games(game_date: date | None = None) -> pd.DataFrame:
         for game in date_entry.get("games", []):
             away = game.get("teams", {}).get("away", {})
             home = game.get("teams", {}).get("home", {})
+            # probablePitcher is absent when the starter is still TBD; the
+            # chained .get keeps id/name null in that case rather than failing.
+            away_prob = away.get("probablePitcher", {})
+            home_prob = home.get("probablePitcher", {})
             rows.append({
                 "game_id": game.get("gamePk"),
                 "away_team": away.get("team", {}).get("name"),
                 "home_team": home.get("team", {}).get("name"),
-                "away_pitcher": away.get("probablePitcher", {}).get("fullName"),
-                "home_pitcher": home.get("probablePitcher", {}).get("fullName"),
+                "away_pitcher": away_prob.get("fullName"),
+                "away_pitcher_id": away_prob.get("id"),
+                "home_pitcher": home_prob.get("fullName"),
+                "home_pitcher_id": home_prob.get("id"),
                 "game_time": game.get("gameDate"),
                 "status": game.get("status", {}).get("detailedState"),
                 "venue": game.get("venue", {}).get("name"),
