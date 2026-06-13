@@ -31,8 +31,26 @@ GOLD_DIR = pathlib.Path(__file__).resolve().parent / "data"
 HITTER_XWOBA_GAP = 0.030
 HITTER_HARD_HIT_PCTL = 40
 
-PITCHER_XERA_GAP = 0.50
+# Sign convention (must match the Stage B "Roster vs Available" lens):
+#   hitter gap = est_woba - woba  -> POSITIVE = underperforming = BUY (breakout)
+#   pitcher gap = xera - era      -> NEGATIVE = xERA below ERA = unlucky = ERA
+#                                    should fall = BUY (breakout)
+# So the pitcher breakout threshold is NEGATIVE: a candidate must score AT OR
+# BELOW it. Do not "simplify" this to a positive value — that re-inverts the
+# bug and surfaces lucky over-performers (sells) as breakouts.
+PITCHER_XERA_GAP = -0.50
 PITCHER_K_BB_PCT = 10
+
+# Outcome-quality guard — the mirror of the regression_alerts guard. A BUY only
+# makes sense when the EXPECTED stat is already good: an unlucky pitcher whose
+# xERA is still terrible, or an underperforming hitter whose xwOBA is still weak,
+# is not a buy just because his surface line trails it. These are the same
+# absolute league-average anchors regression_alerts uses (~.320 league-average
+# wOBA, ~3.50 a clearly-good ERA/xERA) rather than population percentiles, so the
+# cutoff is stable and does not drift with who qualifies this week. A buy must
+# clear the floor: est_woba above it for hitters, xERA below it for pitchers.
+HITTER_QUALITY_FLOOR = 0.320
+PITCHER_QUALITY_FLOOR = 3.50
 
 # Two-way players are noise on every breakout lens: they are never a free
 # agent, never a clean trade/add target, never acquirable.  We drop them from
@@ -137,6 +155,9 @@ def detect_breakout_hitters(df: pd.DataFrame) -> pd.DataFrame:
     A hitter qualifies when ALL conditions are true:
         - ``xwoba_minus_woba >= 0.030`` (underlying quality exceeds results)
         - ``hard_hit_percentile >= 40`` (real contact quality, not BABIP luck)
+        - ``est_woba > 0.320`` (the expected output is above league average and
+          worth buying into — not a still-below-average bat that merely trails an
+          even-worse surface line)
 
     Args:
         df: Enriched hitter DataFrame from the silver layer.
@@ -147,6 +168,7 @@ def detect_breakout_hitters(df: pd.DataFrame) -> pd.DataFrame:
     mask = (
         (df["xwoba_minus_woba"] >= HITTER_XWOBA_GAP)
         & (df["hard_hit_percentile"] >= HITTER_HARD_HIT_PCTL)
+        & (df["est_woba"] > HITTER_QUALITY_FLOOR)
     )
     return (
         df.loc[mask]
@@ -158,8 +180,12 @@ def detect_breakout_hitters(df: pd.DataFrame) -> pd.DataFrame:
 def detect_breakout_pitchers(df: pd.DataFrame) -> pd.DataFrame:
     """Flag pitcher breakout candidates based on expected-stat gaps.
 
-    Primary filter (required):
-        - ``xera_minus_era >= 0.50`` (ERA should be lower than it is)
+    Required filters (BOTH):
+        - ``xera_minus_era <= -0.50`` (xERA below ERA: pitcher unlucky, ERA
+          should fall — a buy). See the sign-convention note on the threshold
+          constants; the most-negative gaps are the strongest breakouts.
+        - ``xera < 3.50`` (the expected level is good and worth buying — not a
+          still-bad arm whose ERA merely ran even worse)
 
     Optional secondary filter (applied only when data is available and valid):
         - ``k_minus_bb_pct`` — used for sorting, not hard filtering
@@ -168,12 +194,13 @@ def detect_breakout_pitchers(df: pd.DataFrame) -> pd.DataFrame:
         df: Enriched pitcher DataFrame from the silver layer.
 
     Returns:
-        Filtered DataFrame ranked by ``xera_minus_era`` descending.
+        Filtered DataFrame ranked by ``xera_minus_era`` ascending
+        (most unlucky first).
     """
     print(f"  Pitcher columns available: {list(df.columns)}")
 
-    mask = df["xera_minus_era"] >= PITCHER_XERA_GAP
-    print(f"  Pitchers with xera_minus_era >= {PITCHER_XERA_GAP}: {mask.sum()}")
+    mask = (df["xera_minus_era"] <= PITCHER_XERA_GAP) & (df["xera"] < PITCHER_QUALITY_FLOOR)
+    print(f"  Pitchers passing gap + quality guard: {mask.sum()}")
 
     if "k_minus_bb_pct" in df.columns and df["k_minus_bb_pct"].notna().any():
         print(f"  k_minus_bb_pct range: {df['k_minus_bb_pct'].min():.3f} – {df['k_minus_bb_pct'].max():.3f}")
@@ -183,9 +210,10 @@ def detect_breakout_pitchers(df: pd.DataFrame) -> pd.DataFrame:
 
     result = df.loc[mask].copy()
 
-    # Sort by xera gap, then k-bb% as tiebreaker if available
+    # Sort by xera gap (ascending: most-negative = most unlucky = strongest
+    # buy leads), then k-bb% descending as tiebreaker if available.
     sort_cols = ["xera_minus_era"]
-    sort_asc = [False]
+    sort_asc = [True]
     if "k_minus_bb_pct" in result.columns and result["k_minus_bb_pct"].notna().any():
         sort_cols.append("k_minus_bb_pct")
         sort_asc.append(False)

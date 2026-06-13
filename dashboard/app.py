@@ -736,9 +736,12 @@ def _breakout_lens_scatter(
         A Plotly figure.
     """
     df = df.copy()
+    # Format the gap with its OWN sign (the "+" format flag), so a positive
+    # hitter buy reads "+0.055" and a negative pitcher buy reads "-1.78" — a
+    # hardcoded "+" used to render negative gaps as "+-1.78".
     df["_gap_label"] = (
         df["player_name"].str.split().str[-1]
-        + " (+" + df[gap].map(lambda v: format(v, gap_fmt)) + ")"
+        + " (" + df[gap].map(lambda v: format(v, f"+{gap_fmt}")) + ")"
     )
 
     hover = {x: f":{gap_fmt}", y: f":{gap_fmt}", gap: f":{gap_fmt}"}
@@ -1039,15 +1042,15 @@ def page_regression_watch():
         st.subheader("Pitchers")
         st.caption(
             "These pitchers have ERAs significantly lower than their expected ERA (xERA). "
-            "A large negative gap means they've been getting lucky with strand rate, BABIP "
-            "against, or sequencing. Their stuff quality doesn't support the current ERA. "
-            "Expect the ERA to rise."
+            "A large positive xERA-minus-ERA gap means they've been getting lucky with "
+            "strand rate, BABIP against, or sequencing. Their stuff quality doesn't support "
+            "the current ERA. Expect the ERA to rise."
         )
         rp = _load_csv(GOLD / "regression_pitchers.csv")
         if rp is not None:
             gap_col = "xera_minus_era" if "xera_minus_era" in rp.columns else "era_minus_xera_diff"
             if gap_col in rp.columns:
-                rp = rp.sort_values(gap_col, ascending=True)  # most negative = biggest overperformer (ERA below xERA)
+                rp = rp.sort_values(gap_col, ascending=False)  # most positive = luckiest overperformer (ERA below xERA)
             show_cols = [c for c in ["player_name", "team", "position", "era", "xera", gap_col] if c in rp.columns]
             st.dataframe(rp[show_cols], use_container_width=True, hide_index=True)
 
