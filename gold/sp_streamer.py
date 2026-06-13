@@ -254,12 +254,19 @@ def score_streamers(
         .round(1)
     )
 
-    # K% score — higher is better
+    # K% score — higher is better. Neutral-median policy: k_percent is
+    # FanGraphs-sourced and null for a probable starter with no FanGraphs row
+    # (the enriched table now spans the full Savant population, not just the
+    # FanGraphs intersection). Rank only pitchers who have a K% (na_option="keep"
+    # drops NaN) and fill the unknowns with 50, so a real strikeout arm missing
+    # from the stale snapshot lands mid-pack on this 30%-weight component rather
+    # than at the floor. This is an honest "unknown", not invented K data.
     merged["k_score"] = (
         merged["k_percent"]
-        .rank(pct=True, na_option="bottom")
+        .rank(pct=True, na_option="keep")
         .mul(100)
         .round(1)
+        .fillna(50.0)
     )
 
     # Opponent weakness score

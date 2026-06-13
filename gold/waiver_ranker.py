@@ -91,17 +91,23 @@ def score_hitters(df: pd.DataFrame) -> pd.DataFrame:
     # HR upside – barrel percentile is already 0-100
     scored["hr_score"] = scored["barrel_percentile"].fillna(0)
 
-    # Speed / SB upside
+    # Speed / SB upside. Neutral-median policy: sprint_speed comes from FanGraphs,
+    # which is left-joined onto the full-Savant population and is null for players
+    # with no FanGraphs row. A missing value is an honest "unknown", not zero, so
+    # rank only players who HAVE it (na_option="keep" drops NaN from the ranking)
+    # and fill the unknowns with 50 (mid-pack). Burying them at the floor would
+    # unfairly sink real players whose only gap is a stale-FanGraphs snapshot.
     if "sprint_speed" in scored.columns:
         scored["speed_score"] = (
             scored["sprint_speed"]
-            .rank(pct=True, na_option="bottom")
+            .rank(pct=True, na_option="keep")
             .mul(100)
             .round(1)
+            .fillna(50.0)
         )
     else:
-        print("  WARNING: sprint_speed not available; speed_score set to 0")
-        scored["speed_score"] = 0.0
+        print("  WARNING: sprint_speed not available; speed_score set to neutral 50")
+        scored["speed_score"] = 50.0
 
     # OBP proxy – percentile-rank xwOBA (est_woba column)
     scored["obp_score"] = (
@@ -153,15 +159,21 @@ def score_pitchers(df: pd.DataFrame) -> pd.DataFrame:
         k_col = None
         print("  WARNING: no strikeout column found; k_score set to 0")
 
+    # Neutral-median policy (see score_hitters): k_percent / k_per_9 are
+    # FanGraphs-sourced and null for players with no FanGraphs row. Rank only
+    # players who have the value and fill the unknowns with 50, so a real
+    # strikeout arm absent from the stale FanGraphs snapshot lands mid-pack, not
+    # last.
     if k_col:
         scored["k_score"] = (
             scored[k_col]
-            .rank(pct=True, na_option="bottom")
+            .rank(pct=True, na_option="keep")
             .mul(100)
             .round(1)
+            .fillna(50.0)
         )
     else:
-        scored["k_score"] = 0.0
+        scored["k_score"] = 50.0
 
     # ERA – lower xERA is better, so rank ascending=False
     scored["era_score"] = (
