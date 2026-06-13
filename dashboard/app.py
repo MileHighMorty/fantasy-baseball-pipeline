@@ -19,6 +19,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from gold.ownership import attach_status  # noqa: E402  (needs PROJECT_ROOT on path)
+
 GOLD = PROJECT_ROOT / "gold" / "data"
 SILVER = PROJECT_ROOT / "silver" / "data"
 FANGRAPHS = PROJECT_ROOT / "bronze" / "data" / "fangraphs"
@@ -803,16 +805,146 @@ def _render_breakout_lens(df, own_value, lens, *, noun, required, **scatter_kwar
     )
 
 
+def _stacked_panel(
+    attached: pd.DataFrame,
+    *,
+    x: str,
+    y: str,
+    gap_col: str,
+    invert_gap: bool,
+    x_label: str,
+    y_label: str,
+    title: str,
+    diag_pad: float,
+    gap_fmt: str,
+    noun: str,
+) -> tuple[int, int]:
+    """Render one roster-vs-available gap panel; return (n_roster, n_fa) plotted.
+
+    ``buy_magnitude`` is normalized so POSITIVE = buy/breakout for BOTH hitters
+    and pitchers — the pitcher gap (xera-era, where buy is negative) is negated
+    so a single diverging colour scale reads the same direction in both panels.
+    Roster players are stars, free agents circles.
+
+    Args:
+        attached: Statcast frame with ``status``/``fantrax_team_name`` attached.
+        x, y: Expected vs actual metric columns.
+        gap_col: Signed gap column (``xwoba_minus_woba`` / ``xera_minus_era``).
+        invert_gap: Negate the gap so positive = buy (True for pitchers).
+        x_label, y_label, title: Display strings.
+        diag_pad: Padding for the x=y reference line.
+        gap_fmt: Numeric format for hover values.
+        noun: "hitter"/"pitcher" for the empty-state message.
+
+    Returns:
+        ``(n_roster, n_fa)`` actually plotted.
+    """
+    is_mine = (attached["status"] == "owned") & (
+        attached["fantrax_team_name"] == MY_TEAM
+    )
+    sub = pd.concat(
+        [attached[is_mine], attached[attached["status"] == "fa"]], ignore_index=True
+    ).dropna(subset=[x, y, gap_col])
+
+    if sub.empty:
+        st.info(f"No qualified {noun}s to show for this view.")
+        return 0, 0
+
+    mine = (sub["status"] == "owned") & (sub["fantrax_team_name"] == MY_TEAM)
+    sub["group"] = np.where(mine, "My Roster", "Available (FA)")
+    # Normalize: positive = buy/breakout for both panels.
+    sub["buy_magnitude"] = -sub[gap_col] if invert_gap else sub[gap_col]
+    sub["_marker"] = np.where(mine, 15, 9)  # roster stars read larger
+
+    hover = {"group": True, "_marker": False,
+             x: f":{gap_fmt}", y: f":{gap_fmt}", "buy_magnitude": f":{gap_fmt}"}
+    if "fantrax_position" in sub.columns:
+        hover["fantrax_position"] = True
+
+    fig = px.scatter(
+        sub, x=x, y=y,
+        color="buy_magnitude", color_continuous_scale="RdYlGn",
+        color_continuous_midpoint=0,
+        symbol="group", symbol_map={"My Roster": "star", "Available (FA)": "circle"},
+        size="_marker", size_max=16,
+        hover_name="player_name", hover_data=hover,
+        labels={x: x_label, y: y_label, "buy_magnitude": "Buy signal"},
+        title=title,
+    )
+    lo = min(sub[x].min(), sub[y].min()) - diag_pad
+    hi = max(sub[x].max(), sub[y].max()) + diag_pad
+    fig.add_trace(go.Scatter(
+        x=[lo, hi], y=[lo, hi], mode="lines",
+        line=dict(dash="dash", color="gray", width=2),
+        showlegend=False, name="x = y", hoverinfo="skip",
+    ))
+    fig.update_layout(height=600)
+    st.plotly_chart(fig, use_container_width=True)
+    return int(mine.sum()), int((~mine).sum())
+
+
+def _render_roster_vs_available():
+    """Stacked roster-vs-available gap view (the fourth Breakout Board lens).
+
+    Reads the silver Statcast parquets directly (the full qualified population,
+    including the "performing as expected" middle a roster baseline needs) and
+    attaches ownership/position by vendor id — deliberately NOT the
+    breakout_/regression_ CSVs, which drop the middle and carry the inverted
+    pitcher buy/sell labels.
+    """
+    st.caption(
+        "Your roster (★) vs available free agents (●) on one gap heat map. "
+        "GREEN = BUY (underlying quality beats surface results, expect positive "
+        "regression); RED = SELL (results beat quality, expect negative "
+        "regression); the dashed line is break-even. Qualified players shown — "
+        "roster players below the Statcast qualification floor (minors / IL / "
+        "low PA-IP) do not appear."
+    )
+
+    sh = _load_parquet(SILVER / "statcast_hitters.parquet")
+    sp = _load_parquet(SILVER / "statcast_pitchers.parquet")
+    if sh is None or sp is None:
+        return
+
+    st.subheader("Hitters — xwOBA vs wOBA")
+    nr, nfa = _stacked_panel(
+        attach_status(sh),
+        x="est_woba", y="woba", gap_col="xwoba_minus_woba", invert_gap=False,
+        x_label="xwOBA (Expected)", y_label="wOBA (Actual)",
+        title="Hitters: roster vs available", diag_pad=0.010, gap_fmt=".3f",
+        noun="hitter",
+    )
+    st.caption(f"My Roster: {nr} · Available: {nfa}")
+
+    st.subheader("Pitchers — xERA vs ERA")
+    nr, nfa = _stacked_panel(
+        attach_status(sp),
+        x="xera", y="era", gap_col="xera_minus_era", invert_gap=True,
+        x_label="xERA (Expected)", y_label="ERA (Actual)",
+        title="Pitchers: roster vs available", diag_pad=0.20, gap_fmt=".2f",
+        noun="pitcher",
+    )
+    st.caption(f"My Roster: {nr} · Available: {nfa}")
+
+
 def page_breakout_board():
     st.header("Breakout Board")
     st.caption(
         "One breakout signal — underlying Statcast quality vs surface results — "
-        "through three ownership lenses."
+        "through ownership lenses."
     )
 
     lens = st.radio(
-        "Lens", ["My Roster", "Available (FA)", "Trade Targets"], horizontal=True
+        "Lens",
+        ["My Roster", "Available (FA)", "Trade Targets", "Roster vs Available"],
+        horizontal=True,
     )
+
+    # New stacked view: separate loader + render path, so an incomplete version
+    # can never break the three existing lenses below.
+    if lens == "Roster vs Available":
+        _render_roster_vs_available()
+        return
 
     if lens == "My Roster":
         own_value = MY_TEAM
