@@ -36,22 +36,27 @@ def load_id_map() -> pd.DataFrame:
     return pd.read_parquet(ID_MAP_PATH)
 
 
-def _status_by_id(
+def _attrs_by_id(
     id_map: pd.DataFrame, id_col: str
-) -> tuple[dict[int, str], dict[int, str]]:
-    """Map each resolved vendor id to its (status, fantrax_team_name).
+) -> tuple[dict[int, str], dict[int, str], dict[int, str]]:
+    """Map each resolved vendor id to its (status, fantrax_team_name, position).
 
     A single vendor id can appear on more than one id_map row: a two-way
     player (Ohtani) shares one MLBAM/FanGraphs id across his Hitter and
     Pitcher rows.  'owned' wins over 'fa' on collision so a player rostered
     under either role is never reported as available.
 
+    ``position`` is the Fantrax eligibility string the id_map carries
+    verbatim ("C,1B" / "SP,RP") — the authority on what positions a player
+    qualifies at.
+
     Args:
         id_map: The silver player ID map.
         id_col: Vendor id column to key on.
 
     Returns:
-        ``(status_by_id, team_by_id)`` keyed by the integer vendor id.
+        ``(status_by_id, team_by_id, position_by_id)`` keyed by the integer
+        vendor id.
     """
     sub = id_map[id_map[id_col].notna()].copy()
     # owned sorts before fa, so drop_duplicates(keep="first") resolves a
@@ -64,22 +69,32 @@ def _status_by_id(
         int(k): (v if isinstance(v, str) else "")
         for k, v in zip(sub[id_col], sub["fantrax_team_name"])
     }
-    return status_by_id, team_by_id
+    position_by_id = {
+        int(k): (v if isinstance(v, str) else "")
+        for k, v in zip(sub[id_col], sub["position"])
+    }
+    return status_by_id, team_by_id, position_by_id
 
 
 def attach_status(df: pd.DataFrame) -> pd.DataFrame:
-    """Attach ``status`` and ``fantrax_team_name`` via resolved vendor ids.
+    """Attach ``status``, ``fantrax_team_name``, ``fantrax_position`` by vendor id.
 
     Joins on ``savant_player_id``, falling back to ``fangraphs_id`` where
     Savant is null or unmatched.  Rows with no id_map match in either source
     get ``status`` ``<NA>`` — callers treat those as not available.
+
+    ``fantrax_position`` carries the Fantrax eligibility string ("C,1B") and
+    is added under a distinct name so it never collides with a Statcast
+    ``position`` column already on *df*; the caller chooses whether to adopt
+    it.
 
     Args:
         df: A frame carrying ``savant_player_id`` and ``fangraphs_id``
             columns (e.g. a silver Statcast table).
 
     Returns:
-        A copy of *df* with ``status`` and ``fantrax_team_name`` columns.
+        A copy of *df* with ``status``, ``fantrax_team_name``, and
+        ``fantrax_position`` columns.
     """
     missing = [c for c in _ID_COLUMNS if c not in df.columns]
     if missing:
@@ -88,25 +103,30 @@ def attach_status(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     id_map = load_id_map()
-    sav_status, sav_team = _status_by_id(id_map, "savant_player_id")
-    fg_status, fg_team = _status_by_id(id_map, "fangraphs_id")
+    sav_status, sav_team, sav_pos = _attrs_by_id(id_map, "savant_player_id")
+    fg_status, fg_team, fg_pos = _attrs_by_id(id_map, "fangraphs_id")
 
     statuses: list[object] = []
     teams: list[object] = []
+    positions: list[object] = []
     for sav, fg in zip(df["savant_player_id"], df["fangraphs_id"]):
         if pd.notna(sav) and int(sav) in sav_status:
             statuses.append(sav_status[int(sav)])
             teams.append(sav_team[int(sav)])
+            positions.append(sav_pos[int(sav)])
         elif pd.notna(fg) and int(fg) in fg_status:
             statuses.append(fg_status[int(fg)])
             teams.append(fg_team[int(fg)])
+            positions.append(fg_pos[int(fg)])
         else:
             statuses.append(pd.NA)
             teams.append(pd.NA)
+            positions.append(pd.NA)
 
     out = df.copy()
     out["status"] = statuses
     out["fantrax_team_name"] = teams
+    out["fantrax_position"] = positions
     return out
 
 
@@ -126,7 +146,7 @@ def available_players(df: pd.DataFrame, label: str) -> pd.DataFrame:
     n_owned = int((attached["status"] == "owned").sum())
     n_no_idmap = int(attached["status"].isna().sum())
     fa = attached[attached["status"] == "fa"].drop(
-        columns=["status", "fantrax_team_name"]
+        columns=["status", "fantrax_team_name", "fantrax_position"]
     )
     print(
         f"  Ownership filter ({label}): {len(fa)} available | "

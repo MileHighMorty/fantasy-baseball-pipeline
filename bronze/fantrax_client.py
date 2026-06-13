@@ -158,10 +158,22 @@ def fetch_all_rosters(api: FantraxAPI) -> pd.DataFrame:
                     key = head.get("sortKey")
                     if key in points and cell.get("content") not in (None, ""):
                         points[key] = cell["content"]
+                # posShortNames is the multi-position ELIGIBILITY string
+                # ("C,1B") — the same field fetch_free_agents reads, and the
+                # authority on what positions a player qualifies at.  Prefer it
+                # over the roster slot (posId -> short_name), which is just
+                # today's lineup spot.  Fall back to the slot only when Fantrax
+                # omits eligibility, so position is never blank.  Do NOT derive
+                # from posIds: it appends the UT/flex slot 014 and would mark
+                # every hitter UT-eligible.
+                eligibility = (
+                    scorer.get("posShortNames")
+                    or api.positions[row["posId"]].short_name
+                )
                 records.append({
                     "team_name": team.name,
                     "player_name": scorer["name"],
-                    "position": api.positions[row["posId"]].short_name,
+                    "position": eligibility,
                     "fantasy_points": points["SCORE"],
                     "points_per_game": points["FPTS_PER_GAME"],
                     "fantrax_id": scorer["scorerId"],

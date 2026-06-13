@@ -53,6 +53,40 @@ def test_canonical_name_keeps_accents_but_strips_suffix():
     assert pim._canonical_name("José Ferrer") == "José Ferrer"
 
 
+# ── player_type from (possibly multi-position) eligibility string ──────
+
+
+@pytest.mark.parametrize(
+    ("position", "expected"),
+    [
+        # Single positions
+        ("SP", "Pitcher"),
+        ("RP", "Pitcher"),
+        ("P", "Pitcher"),
+        ("C", "Hitter"),
+        ("SS", "Hitter"),
+        ("UT", "Hitter"),
+        # Multi-position: a pure pitching listing is a Pitcher...
+        ("SP,RP", "Pitcher"),
+        # ...but ANY hitting eligibility means the offensive row is the one
+        # worth matching, so the player classifies as a Hitter.
+        ("C,1B", "Hitter"),
+        ("1B,OF", "Hitter"),
+        ("OF,UT", "Hitter"),
+        ("1B,2B,3B,SS,OF", "Hitter"),
+        # Mixed hit+pitch (amateur/two-way FA listings) -> Hitter by the
+        # same rule; "/" is accepted as a delimiter alongside ",".
+        ("C,SP", "Hitter"),
+        ("OF/SP", "Hitter"),
+        # Empty / unknown -> Hitter (the safe default; bronze never emits
+        # blank, it falls back to the roster slot).
+        ("", "Hitter"),
+    ],
+)
+def test_player_type_from_position(position, expected):
+    assert pim._player_type_from_position(position) == expected
+
+
 # ── score classification band boundaries ───────────────────────────────
 
 

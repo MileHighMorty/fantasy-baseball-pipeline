@@ -6,7 +6,7 @@ their surface-level results, suggesting positive regression ahead.
 Inputs:
     silver/data/statcast_hitters.parquet
     silver/data/statcast_pitchers.parquet
-    bronze/data/fantrax/all_rosters_*.csv
+    silver/data/player_id_map.parquet   (ownership: status owned/fa)
 
 Outputs:
     gold/data/breakout_hitters_all.csv
@@ -18,15 +18,13 @@ Outputs:
 import pathlib
 
 import pandas as pd
-from rapidfuzz import process, fuzz
+
+from gold.ownership import attach_status
 
 # ── paths ────────────────────────────────────────────────────────────
 
 SILVER_DIR = pathlib.Path(__file__).resolve().parent.parent / "silver" / "data"
 GOLD_DIR = pathlib.Path(__file__).resolve().parent / "data"
-FANTRAX_DIR = pathlib.Path(__file__).resolve().parent.parent / "bronze" / "data" / "fantrax"
-
-FUZZY_THRESHOLD = 90
 
 # ── thresholds ───────────────────────────────────────────────────────
 
@@ -35,6 +33,14 @@ HITTER_HARD_HIT_PCTL = 40
 
 PITCHER_XERA_GAP = 0.50
 PITCHER_K_BB_PCT = 10
+
+# Two-way players are noise on every breakout lens: they are never a free
+# agent, never a clean trade/add target, never acquirable.  We drop them from
+# the breakout OUTPUTS ONLY, after ownership is derived — their identities and
+# their (possibly two) correct owners stay fully intact in the id_map and
+# player master, which this module never writes.  Seeded with the league's
+# only current two-way player; add canonical names here as needed.
+TWO_WAY_EXCLUDE = {"Shohei Ohtani"}
 
 
 # ── loaders ──────────────────────────────────────────────────────────
@@ -58,61 +64,68 @@ def load_pitchers() -> pd.DataFrame:
     return pd.read_parquet(SILVER_DIR / "statcast_pitchers.parquet")
 
 
-# ── roster / ownership ──────────────────────────────────────────────
+# ── ownership ────────────────────────────────────────────────────────
 
 
-def load_all_rosters() -> pd.DataFrame | None:
-    """Load the latest date-stamped all_rosters CSV from Fantrax."""
-    files = sorted(FANTRAX_DIR.glob("all_rosters_*.csv"))
-    if not files:
-        print("  WARNING: No all_rosters CSV found in", FANTRAX_DIR)
-        return None
-    latest = files[-1]
-    print(f"  Loaded roster file: {latest.name}")
-    df = pd.read_csv(latest)
-    df["player_name"] = df["player_name"].str.strip()
-    return df
+def tag_ownership(breakout: pd.DataFrame) -> pd.DataFrame:
+    """Add 'ownership' and authoritative 'position' from resolved identity.
 
+    Joins to the silver ID map on savant_player_id (fallback fangraphs_id)
+    via :func:`gold.ownership.attach_status`, so a Fantrax two-way suffix or
+    an accent/spelling difference (e.g. Statcast's "Lance McCullers Jr." vs
+    the id map's "Lance Mccullers Jr") can never mislabel a player the way
+    the old token-ratio name match could.
 
-def _build_owned_set(rosters: pd.DataFrame) -> set[str]:
-    """Return the set of owned player names (exclude 'None' placeholders)."""
-    names = rosters.loc[rosters["player_name"].notna(), "player_name"]
-    return {n for n in names if n != "None"}
+    Two columns are set from the join:
 
+    * ``ownership`` — the owning fantasy team when rostered, else ``"FA"``
+      (covering id-map status 'fa' and any player with no id-map row).
+    * ``position`` — overwritten with the Fantrax multi-position eligibility
+      string ("C,1B", "SP,RP").  The breakout frame's incoming position comes
+      from the FanGraphs-derived player universe, which is null for hitters
+      and a blanket "P" for pitchers; the Fantrax value is the authority.
+      Kept as the canonical comma string — explosion is a display concern.
+      Falls back to the incoming value only when a player has no id-map row,
+      so position is never silently dropped.
 
-def tag_ownership(
-    breakout: pd.DataFrame,
-    rosters: pd.DataFrame | None,
-) -> pd.DataFrame:
-    """Add an 'ownership' column: team name if owned, 'FA' if not."""
+    Args:
+        breakout: A breakout frame carrying ``savant_player_id`` and
+            ``fangraphs_id`` (both present on the Statcast-sourced frames).
+
+    Returns:
+        The frame with ``ownership`` set and ``position`` replaced.
+    """
+    attached = attach_status(breakout)
     df = breakout.copy()
-    if rosters is None:
-        df["ownership"] = "Unknown"
-        return df
-
-    owned_names = _build_owned_set(rosters)
-    # Build a lookup: owned_name -> team_name
-    roster_lookup: dict[str, str] = {}
-    for _, row in rosters.iterrows():
-        pn = row["player_name"]
-        if pd.notna(pn) and pn != "None":
-            roster_lookup[pn] = row["team_name"]
-
-    owned_list = list(owned_names)
-
-    def _match(player: str) -> str:
-        if not owned_list:
-            return "FA"
-        result = process.extractOne(
-            player, owned_list, scorer=fuzz.token_sort_ratio, score_cutoff=FUZZY_THRESHOLD
-        )
-        if result is None:
-            return "FA"
-        matched_name = result[0]
-        return roster_lookup.get(matched_name, "FA")
-
-    df["ownership"] = df["player_name"].apply(_match)
+    df["ownership"] = (
+        attached["fantrax_team_name"]
+        .where(attached["status"] == "owned", "FA")
+        .values
+    )
+    df["position"] = (
+        attached["fantrax_position"]
+        .where(attached["fantrax_position"].notna(), df.get("position"))
+        .values
+    )
     return df
+
+
+def drop_two_way(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove two-way players (see ``TWO_WAY_EXCLUDE``) from a breakout frame.
+
+    Matches on the canonical name so a Fantrax role suffix ("-H"/"-P") can
+    never sneak a two-way player past the filter, though Statcast-sourced
+    breakout names are already clean.
+
+    Args:
+        df: A breakout frame with a ``player_name`` column, already tagged
+            with ownership.
+
+    Returns:
+        The frame with any ``TWO_WAY_EXCLUDE`` players removed.
+    """
+    canonical = df["player_name"].str.replace(r"-[HP]$", "", regex=True).str.strip()
+    return df.loc[~canonical.isin(TWO_WAY_EXCLUDE)].reset_index(drop=True)
 
 
 # ── detection ────────────────────────────────────────────────────────
@@ -254,12 +267,13 @@ def main() -> None:
     pitchers = load_pitchers()
     print(f"  {len(pitchers)} pitchers loaded")
 
-    print("Loading Fantrax rosters for ownership tagging...")
-    rosters = load_all_rosters()
-
     print("Detecting breakout hitters...")
     breakout_h = detect_breakout_hitters(hitters)
-    breakout_h = tag_ownership(breakout_h, rosters)
+    breakout_h = tag_ownership(breakout_h)
+    before_h = len(breakout_h)
+    breakout_h = drop_two_way(breakout_h)
+    if before_h != len(breakout_h):
+        print(f"  Excluded {before_h - len(breakout_h)} two-way player(s) from breakout output")
     fa_h = breakout_h[breakout_h["ownership"] == "FA"].reset_index(drop=True)
     print(f"  {len(breakout_h)} breakout hitter candidates ({len(fa_h)} free agents)\n")
     if not breakout_h.empty:
@@ -269,7 +283,11 @@ def main() -> None:
     print("Detecting breakout pitchers...")
     breakout_p = detect_breakout_pitchers(pitchers)
     print(f"  {len(breakout_p)} total pitcher breakout candidates")
-    breakout_p = tag_ownership(breakout_p, rosters)
+    breakout_p = tag_ownership(breakout_p)
+    before_p = len(breakout_p)
+    breakout_p = drop_two_way(breakout_p)
+    if before_p != len(breakout_p):
+        print(f"  Excluded {before_p - len(breakout_p)} two-way player(s) from breakout output")
     fa_p = breakout_p[breakout_p["ownership"] == "FA"].reset_index(drop=True)
     print(f"  {len(fa_p)} FA pitcher breakout candidates\n")
     if not breakout_p.empty:

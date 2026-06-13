@@ -26,6 +26,15 @@ FANTRAX = PROJECT_ROOT / "bronze" / "data" / "fantrax"
 MY_TEAM = "Rutsch Hour"
 FUZZY_THRESHOLD = 85
 
+# The 12 fantasy teams in the league. Single source for the breakout-board
+# team picker and the per-owner style map.
+LEAGUE_TEAMS = [
+    "Ben", "Chad", "George", "J-Rod Show", "Jorp", "Mullets",
+    "Negs", "One Pathetic Luzar", "Porter",
+    "Professor McGonigle", "Rutsch Hour", "Young Gunz",
+]
+OTHER_TEAMS = [t for t in LEAGUE_TEAMS if t != MY_TEAM]
+
 
 @st.cache_data(ttl=3600)
 def _load_id_map() -> pd.DataFrame | None:
@@ -620,11 +629,7 @@ def page_session_prep():
 
 def _breakout_style_maps():
     """Return shared color/symbol/opacity maps for breakout charts."""
-    _LEAGUE_TEAMS = [
-        "Ben", "Chad", "George", "J-Rod Show", "Jorp", "Mullets",
-        "Negs", "One Pathetic Luzar", "Porter",
-        "Professor McGonigle", "Rutsch Hour", "Young Gunz",
-    ]
+    _LEAGUE_TEAMS = LEAGUE_TEAMS
     _TEAM_COLORS = [
         "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c", "#3498db",
         "#9b59b6", "#e84393", "#fd79a8", "#00cec9", "#6c5ce7", "#ffeaa7",
@@ -695,155 +700,153 @@ def _add_ownership(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _breakout_lens_scatter(
+    df: pd.DataFrame,
+    *,
+    x: str,
+    y: str,
+    gap: str,
+    x_label: str,
+    y_label: str,
+    title: str,
+    diag_pad: float,
+    label_dy: float,
+    gap_fmt: str,
+):
+    """Build a single-lens breakout scatter coloured and sized by gap magnitude.
+
+    ``gap`` is the distance off the x=y diagonal (xwOBA-wOBA for hitters,
+    xERA-ERA for pitchers) and is always positive within the breakout set, so
+    a continuous colour+size scale makes the strongest buy signals pop without
+    leaning on owner colour (moot in a single-lens view).  Each point is
+    labelled with the player's last name and the gap magnitude.
+
+    Args:
+        df: Already ownership-filtered breakout frame (non-empty).
+        x, y: Expected vs actual metric columns.
+        gap: Signed off-diagonal gap column used for colour, size, and label.
+        x_label, y_label, title: Display strings.
+        diag_pad: Padding to extend the x=y reference line past the data.
+        label_dy: Vertical offset for the text labels above each point.
+        gap_fmt: Numeric format (e.g. ``".3f"``) for the gap in the label.
+
+    Returns:
+        A Plotly figure.
+    """
+    df = df.copy()
+    df["_gap_label"] = (
+        df["player_name"].str.split().str[-1]
+        + " (+" + df[gap].map(lambda v: format(v, gap_fmt)) + ")"
+    )
+
+    hover = {x: f":{gap_fmt}", y: f":{gap_fmt}", gap: f":{gap_fmt}"}
+    for opt in ("team", "position"):
+        if opt in df.columns:
+            hover[opt] = True
+
+    fig = px.scatter(
+        df, x=x, y=y,
+        color=gap, color_continuous_scale="Plasma",
+        size=gap, size_max=24,
+        hover_name="player_name", hover_data=hover,
+        labels={x: x_label, y: y_label, gap: "Gap off diagonal"},
+        title=title,
+    )
+
+    lo = min(df[x].min(), df[y].min()) - diag_pad
+    hi = max(df[x].max(), df[y].max()) + diag_pad
+    fig.add_trace(go.Scatter(
+        x=[lo, hi], y=[lo, hi], mode="lines",
+        line=dict(dash="dash", color="white", width=2),
+        showlegend=False, name="x = y", hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df[x], y=df[y] + label_dy, mode="text", text=df["_gap_label"],
+        textposition="top center", textfont=dict(size=11, color="white"),
+        showlegend=False, hoverinfo="skip",
+    ))
+    fig.update_layout(height=620)
+    return fig
+
+
+def _render_breakout_lens(df, own_value, lens, *, noun, required, **scatter_kwargs):
+    """Filter a breakout frame to one ownership lens and render its scatter.
+
+    Renders nothing but a friendly message when the lens is empty — FA and
+    per-team slices are legitimately thin or zero, and an empty chart reads
+    as broken.
+
+    Args:
+        df: A breakout frame (or None when the CSV is missing).
+        own_value: The ``ownership`` value this lens selects.
+        lens: The lens label, used for the empty-state message.
+        noun: "hitter" or "pitcher", for messages.
+        required: Columns the scatter needs.
+        **scatter_kwargs: Forwarded to :func:`_breakout_lens_scatter`.
+    """
+    if df is None:
+        return
+    if not required.issubset(df.columns):
+        st.error(f"Missing {noun} columns. Need {required}, have {set(df.columns)}")
+        return
+    sub = df[df["ownership"] == own_value].sort_values(
+        scatter_kwargs["gap"], ascending=False
+    )
+    if sub.empty:
+        where = {"My Roster": "your roster", "Available (FA)": "free agents"}.get(
+            lens, own_value
+        )
+        st.info(f"No {noun} breakout candidates for {where}.")
+        return
+    st.plotly_chart(
+        _breakout_lens_scatter(sub, **scatter_kwargs), use_container_width=True
+    )
+
+
 def page_breakout_board():
     st.header("Breakout Board")
-
-    color_map, symbol_map, opacity_map = _breakout_style_maps()
-
-    # ---- Hitter Breakout Board ----
-    st.subheader("Hitter Breakout Board")
     st.caption(
-        "Players above the line have better underlying contact quality than their "
-        "results show. Buy candidates."
+        "One breakout signal — underlying Statcast quality vs surface results — "
+        "through three ownership lenses."
     )
+
+    lens = st.radio(
+        "Lens", ["My Roster", "Available (FA)", "Trade Targets"], horizontal=True
+    )
+
+    if lens == "My Roster":
+        own_value = MY_TEAM
+        st.caption(
+            "Your players' breakout/regression signal — hold, promote, or watch "
+            "for warning signs."
+        )
+    elif lens == "Available (FA)":
+        own_value = "FA"
+        st.caption("Buy-low adds available now — biggest gap leads.")
+    else:  # Trade Targets
+        own_value = st.selectbox("Team", OTHER_TEAMS)
+        st.caption(f"Undervalued players on {own_value} — buy-low trade targets.")
 
     bh = _load_csv(GOLD / "breakout_hitters_all.csv")
-    if bh is not None:
-        required = {"est_woba", "woba", "player_name", "team"}
-        if not required.issubset(bh.columns):
-            st.error(f"Missing columns. Need {required}, have {set(bh.columns)}")
-        else:
-            bh = _add_ownership(bh)
+    bp = _load_csv(GOLD / "breakout_pitchers_all.csv")
 
-            size_col = "hard_hit_percentile" if "hard_hit_percentile" in bh.columns else None
-            if size_col is None and "avg_hit_speed" in bh.columns:
-                size_col = "avg_hit_speed"
-
-            bh["label"] = bh["player_name"].str.split().str[-1] + " (" + bh["team"] + ")"
-
-            hover_fields = {
-                "player_name": True, "team": True, "position": True,
-                "est_woba": ":.3f", "woba": ":.3f",
-            }
-            for hf in ["xwoba_minus_woba", "est_woba_minus_woba_diff"]:
-                if hf in bh.columns:
-                    hover_fields[hf] = ":.3f"
-                    break
-            if "hard_hit_percentile" in bh.columns:
-                hover_fields["hard_hit_percentile"] = ":.1f"
-            if "brl_percent" in bh.columns:
-                hover_fields["brl_percent"] = ":.1f"
-
-            if size_col:
-                bh["_plot_size"] = bh[size_col]
-                bh.loc[bh["status"] == "FA", "_plot_size"] = bh.loc[bh["status"] == "FA", size_col] * 1.4
-                plot_size_col = "_plot_size"
-            else:
-                plot_size_col = None
-
-            category_order = ["FA"] + sorted(set(bh["status"].unique()) - {"FA"})
-
-            fig_h = px.scatter(
-                bh, x="est_woba", y="woba",
-                color="status", color_discrete_map=color_map,
-                symbol="status", symbol_map=symbol_map,
-                size=plot_size_col, size_max=20,
-                hover_data=hover_fields,
-                labels={"est_woba": "xwOBA (Expected)", "woba": "wOBA (Actual)", "status": "Owner"},
-                title="xwOBA vs wOBA",
-                category_orders={"status": category_order},
-            )
-            for trace in fig_h.data:
-                trace.opacity = opacity_map.get(trace.name, 0.6)
-
-            fa_data = bh[bh["status"] == "FA"]
-            if not fa_data.empty:
-                fig_h.add_trace(go.Scatter(
-                    x=fa_data["est_woba"], y=fa_data["woba"] + 0.004,
-                    mode="text", text=fa_data["label"], textposition="top center",
-                    textfont=dict(size=12, color="white"),
-                    showlegend=False, hoverinfo="skip",
-                ))
-
-            lo = min(bh["est_woba"].min(), bh["woba"].min()) - 0.010
-            hi = max(bh["est_woba"].max(), bh["woba"].max()) + 0.010
-            fig_h.add_trace(go.Scatter(
-                x=[lo, hi], y=[lo, hi], mode="lines",
-                line=dict(dash="dash", color="white", width=2),
-                showlegend=False, name="x = y",
-            ))
-            fig_h.update_layout(height=650)
-            st.plotly_chart(fig_h, use_container_width=True)
-
-    # ---- Pitcher Breakout Board ----
-    st.subheader("Pitcher Breakout Board")
-    st.caption(
-        "Players below the line have ERAs inflated beyond what their stuff quality "
-        "suggests. Their xERA says they should be better. Buy candidates."
+    st.subheader("Hitter Breakout — xwOBA vs wOBA")
+    _render_breakout_lens(
+        bh, own_value, lens, noun="hitter",
+        required={"est_woba", "woba", "xwoba_minus_woba", "ownership", "player_name"},
+        x="est_woba", y="woba", gap="xwoba_minus_woba",
+        x_label="xwOBA (Expected)", y_label="wOBA (Actual)",
+        title="xwOBA vs wOBA", diag_pad=0.010, label_dy=0.004, gap_fmt=".3f",
     )
 
-    bp = _load_parquet(SILVER / "statcast_pitchers.parquet")
-    if bp is not None:
-        required_p = {"xera", "era", "player_name", "team"}
-        if not required_p.issubset(bp.columns):
-            st.error(f"Missing pitcher columns. Need {required_p}, have {set(bp.columns)}")
-        else:
-            bp = _add_ownership(bp)
-
-            bp["label"] = bp["player_name"].str.split().str[-1] + " (" + bp["team"] + ")"
-
-            hover_fields_p = {
-                "player_name": True, "team": True,
-                "xera": ":.2f", "era": ":.2f",
-            }
-            if "xera_minus_era" in bp.columns:
-                hover_fields_p["xera_minus_era"] = ":.2f"
-            if "k_percent" in bp.columns:
-                hover_fields_p["k_percent"] = ":.1f"
-            if "barrel_percentile" in bp.columns:
-                hover_fields_p["barrel_percentile"] = ":.1f"
-
-            p_size_col = "hard_hit_percentile" if "hard_hit_percentile" in bp.columns else None
-            if p_size_col:
-                bp["_plot_size"] = bp[p_size_col]
-                bp.loc[bp["status"] == "FA", "_plot_size"] = bp.loc[bp["status"] == "FA", p_size_col] * 1.4
-                plot_size_p = "_plot_size"
-            else:
-                plot_size_p = None
-
-            category_order_p = ["FA"] + sorted(set(bp["status"].unique()) - {"FA"})
-
-            fig_p = px.scatter(
-                bp, x="xera", y="era",
-                color="status", color_discrete_map=color_map,
-                symbol="status", symbol_map=symbol_map,
-                size=plot_size_p, size_max=20,
-                hover_data=hover_fields_p,
-                labels={"xera": "xERA (Expected)", "era": "ERA (Actual)", "status": "Owner"},
-                title="xERA vs ERA",
-                category_orders={"status": category_order_p},
-            )
-            for trace in fig_p.data:
-                trace.opacity = opacity_map.get(trace.name, 0.6)
-
-            fa_pitchers = bp[bp["status"] == "FA"]
-            if not fa_pitchers.empty:
-                fig_p.add_trace(go.Scatter(
-                    x=fa_pitchers["xera"], y=fa_pitchers["era"] + 0.08,
-                    mode="text", text=fa_pitchers["label"], textposition="top center",
-                    textfont=dict(size=12, color="white"),
-                    showlegend=False, hoverinfo="skip",
-                ))
-
-            lo_p = min(bp["xera"].min(), bp["era"].min()) - 0.20
-            hi_p = max(bp["xera"].max(), bp["era"].max()) + 0.20
-            fig_p.add_trace(go.Scatter(
-                x=[lo_p, hi_p], y=[lo_p, hi_p], mode="lines",
-                line=dict(dash="dash", color="white", width=2),
-                showlegend=False, name="x = y",
-            ))
-            fig_p.update_layout(height=650)
-            st.plotly_chart(fig_p, use_container_width=True)
+    st.subheader("Pitcher Breakout — xERA vs ERA")
+    _render_breakout_lens(
+        bp, own_value, lens, noun="pitcher",
+        required={"xera", "era", "xera_minus_era", "ownership", "player_name"},
+        x="xera", y="era", gap="xera_minus_era",
+        x_label="xERA (Expected)", y_label="ERA (Actual)",
+        title="xERA vs ERA", diag_pad=0.20, label_dy=0.08, gap_fmt=".2f",
+    )
 
 
 def page_sp_streaming():

@@ -170,10 +170,11 @@ def _load_fantrax_players() -> pd.DataFrame:
         & (combined["player_name"] != "")
     ].copy()
 
-    # Assign player_type
-    combined["player_type"] = combined["position"].apply(
-        lambda p: "Pitcher" if p in _PITCHER_POSITIONS else "Hitter"
-    )
+    # Assign player_type.  Roster positions are now multi-position eligibility
+    # strings ("SP,RP") like the FA pool, so use the same comma/slash-aware
+    # classifier the FA path uses — an exact-membership test would misread
+    # "SP,RP" as a non-pitcher.
+    combined["player_type"] = combined["position"].apply(_player_type_from_position)
 
     # Deduplicate: keep one row per (player_name, player_type, team_name).
     # This naturally preserves two-way players as separate rows.  Sort so
