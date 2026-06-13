@@ -82,7 +82,10 @@ loudly on schema drift and never coerces silently.
 player to their Savant and FanGraphs records, and the persisted player master
 assigns each resolved player a surrogate key that downstream tables join on. The
 statcast enrichment step then joins expected-vs-actual metrics onto resolved
-identities by vendor ID, not by name.
+identities by vendor ID, not by name. The three analytical MLB sources (Savant,
+FanGraphs, Fantrax) resolve through this map; the MLB Stats and MiLB feeds shown
+in the diagram deliberately flow straight to gold rather than through it, for the
+reasons under known limitations below.
 
 **Gold** turns enriched, identity-resolved data into decisions: breakout and
 regression candidates, waiver-wire and add/drop rankings, starting-pitcher
@@ -274,6 +277,29 @@ This is an honest accounting of where the boundaries are.
   to the newest FanGraphs file on disk and emit a staleness warning rather than
   failing. That is the right resilience tradeoff, but it means FanGraphs-derived
   columns can lag, which is exactly why the matchable-rate framing above matters.
+- **Identity resolution currently covers the three analytical MLB sources.**
+  Savant, FanGraphs, and Fantrax all resolve through the player ID map. The MLB
+  Stats API feed that supplies probable starters for SP streaming still joins by
+  name and team rather than through the resolved map, even though MLB Stats returns
+  the MLBAM player id, which is the same key as `savant_player_id`. Routing that
+  feed through the resolved id is a direct id join with no fuzzy matching needed,
+  and is a near-term fix.
+- **SP streaming has a coverage limitation upstream of identity.** The enriched
+  pitcher table is built from the intersection of Savant and a FanGraphs snapshot,
+  and because the FanGraphs pull degrades to a stale snapshot (the Cloudflare 403
+  above), only a fraction of a day's probable starters currently carry enriched
+  metrics: roughly 6 of 29 on a sample slate, against 27 of 29 present in the raw
+  Savant population. Rebuilding the enriched pitcher table off the full Savant
+  population rather than the FanGraphs-gated intersection is the fix, and it is
+  independent of the join-robustness item above.
+- **MiLB prospect tracking is anchored on MLBAM ids for stats and 40-man status,
+  but not for ownership.** The MiLB stats and 40-man-roster joins are correctly
+  keyed on the MLBAM id; the Fantrax ownership lookup still joins by name. Pre-debut
+  prospects have no row in the MLB-leaderboard-built identity map by construction
+  (only 4 of 25 currently tracked prospects resolve), so this is not a route-through
+  of the current map. The right path is a MLBAM-anchored minors bridge that the main
+  map joins into automatically at call-up via the shared MLBAM key, which is a larger
+  Phase 2 effort.
 - **Rolling-window time intelligence is the next feature.** Today's analysis works
   off the latest snapshot per source. The next build adds rolling windows so the
   pipeline can distinguish a genuine trend from a single hot or cold stretch.
