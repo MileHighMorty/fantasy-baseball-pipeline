@@ -83,9 +83,10 @@ player to their Savant and FanGraphs records, and the persisted player master
 assigns each resolved player a surrogate key that downstream tables join on. The
 statcast enrichment step then joins expected-vs-actual metrics onto resolved
 identities by vendor ID, not by name. The three analytical MLB sources (Savant,
-FanGraphs, Fantrax) resolve through this map; the MLB Stats and MiLB feeds shown
-in the diagram deliberately flow straight to gold rather than through it, for the
-reasons under known limitations below.
+FanGraphs, Fantrax) resolve through this map, and the MLB Stats probable-starter
+feed now resolves through it too by way of the shared MLBAM id. The MiLB feed
+shown in the diagram still flows straight to gold rather than through the map, for
+the reason under known limitations below.
 
 **Gold** turns enriched, identity-resolved data into decisions: breakout and
 regression candidates, waiver-wire and add/drop rankings, starting-pitcher
@@ -277,21 +278,31 @@ This is an honest accounting of where the boundaries are.
   to the newest FanGraphs file on disk and emit a staleness warning rather than
   failing. That is the right resilience tradeoff, but it means FanGraphs-derived
   columns can lag, which is exactly why the matchable-rate framing above matters.
-- **Identity resolution currently covers the three analytical MLB sources.**
-  Savant, FanGraphs, and Fantrax all resolve through the player ID map. The MLB
-  Stats API feed that supplies probable starters for SP streaming still joins by
-  name and team rather than through the resolved map, even though MLB Stats returns
-  the MLBAM player id, which is the same key as `savant_player_id`. Routing that
-  feed through the resolved id is a direct id join with no fuzzy matching needed,
-  and is a near-term fix.
-- **SP streaming has a coverage limitation upstream of identity.** The enriched
-  pitcher table is built from the intersection of Savant and a FanGraphs snapshot,
-  and because the FanGraphs pull degrades to a stale snapshot (the Cloudflare 403
-  above), only a fraction of a day's probable starters currently carry enriched
-  metrics: roughly 6 of 29 on a sample slate, against 27 of 29 present in the raw
-  Savant population. Rebuilding the enriched pitcher table off the full Savant
-  population rather than the FanGraphs-gated intersection is the fix, and it is
-  independent of the join-robustness item above.
+- **The FanGraphs strikeout-rate signal is currently dormant.** Because the
+  FanGraphs pull is stale (the Cloudflare 403 above), the strikeout-rate component
+  of the streaming and waiver scores has no fresh data behind it. Rather than floor
+  the unknowns, the scorers apply a neutral-median policy: a player missing a K rate
+  lands mid-pack instead of at the bottom, so a real strikeout arm absent from the
+  stale snapshot is not unfairly buried. The signal comes back to life once a fresh
+  FanGraphs pull is restored.
+- **The MLB Stats probable-starter feed resolves through the MLBAM id.** MLB Stats
+  returns the MLBAM player id for each probable starter, which is the same key as
+  `savant_player_id`, so SP streaming joins probables to their enriched Statcast row
+  on that id rather than on name and team. The id join is robust to the accent and
+  punctuation differences (Vásquez, Soriano) that the old string join quietly
+  dropped.
+- **The enriched Statcast tables build off the full Savant population.** The
+  enrichment base was once the intersection of Savant and a FanGraphs snapshot,
+  which the stale-FanGraphs fallback shrank to a fraction of the league (54 of 366
+  pitchers). It now builds off the full Savant population and treats FanGraphs as an
+  optional left join bridged through `player_id_map`: pitchers went from 54 to 366
+  and hitters from 176 to 255, and a day's SP-streaming probable coverage from 10 to
+  28 of 30. A player with no FanGraphs row is included with its FanGraphs-derived
+  columns blank rather than excluded outright.
+- **Breakout and regression lists have no role or innings filter.** Built off the
+  full Savant population, they surface plenty of relievers. In a league that punts
+  SVH and rewards starter volume, a role and innings-pitched filter that keeps the
+  lists focused on startable arms is a planned refinement.
 - **MiLB prospect tracking is anchored on MLBAM ids for stats and 40-man status,
   but not for ownership.** The MiLB stats and 40-man-roster joins are correctly
   keyed on the MLBAM id; the Fantrax ownership lookup still joins by name. Pre-debut
@@ -303,10 +314,11 @@ This is an honest accounting of where the boundaries are.
 - **Rolling-window time intelligence is the next feature.** Today's analysis works
   off the latest snapshot per source. The next build adds rolling windows so the
   pipeline can distinguish a genuine trend from a single hot or cold stretch.
-- **The gold pitcher buy/sell labels have a known inversion being cleaned up.**
-  The expected-vs-actual gap for pitchers runs the opposite direction from
-  hitters (a lower ERA than expected is good), and the older breakout/regression
-  CSVs carry that sign inconsistently. The newer "Roster vs Available" dashboard
-  view sidesteps it by reading the silver Statcast tables directly and normalizing
-  the gap so positive always means buy; folding that normalization back into the
-  gold outputs is in progress.
+- **The gold pitcher buy/sell sign convention is consistent across the whole
+  board.** The expected-vs-actual gap for pitchers runs opposite to hitters (a
+  lower ERA than expected is good), and older breakout/regression outputs once
+  carried that sign inconsistently. The gold breakout and regression modules and
+  the dashboard's Roster vs Available view now share one convention, so a buy means
+  the same thing everywhere. League-relative quality guards sit on top of it: the
+  board never flags a still-elite arm as a sell or a still-below-average bat as a
+  buy, with absolute floors at roughly .320 wOBA and 3.50 xERA.
