@@ -12,6 +12,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
+import yaml
 from rapidfuzz import process, fuzz
 
 # Ensure project root is on the path so we can import scripts.weekly_refresh
@@ -25,6 +26,7 @@ GOLD = PROJECT_ROOT / "gold" / "data"
 SILVER = PROJECT_ROOT / "silver" / "data"
 FANGRAPHS = PROJECT_ROOT / "bronze" / "data" / "fangraphs"
 FANTRAX = PROJECT_ROOT / "bronze" / "data" / "fantrax"
+CONFIG = PROJECT_ROOT / "config" / "settings.yaml"
 MY_TEAM = "Rutsch Hour"
 FUZZY_THRESHOLD = 85
 
@@ -216,11 +218,13 @@ def _color_xwoba_gap(val):
         gap = abs(float(val))
     except (ValueError, TypeError):
         return ""
+    # Light pastel backgrounds throughout, so pair each with dark text for
+    # contrast (white-on-coral was the unreadable case being fixed).
     if gap > 0.050:
-        return "background-color: #ff6b6b; color: white"
+        return "background-color: #ff6b6b; color: #1a1a1a"
     if gap > 0.020:
-        return "background-color: #ffd43b"
-    return "background-color: #69db7c"
+        return "background-color: #ffd43b; color: #1a1a1a"
+    return "background-color: #69db7c; color: #1a1a1a"
 
 
 def _score_color(val):
@@ -229,11 +233,44 @@ def _score_color(val):
         v = float(val)
     except (ValueError, TypeError):
         return ""
+    # Light pastel backgrounds throughout, so pair each with dark text for
+    # contrast (white-on-coral was the unreadable case being fixed).
     if v > 70:
-        return "background-color: #69db7c"
+        return "background-color: #69db7c; color: #1a1a1a"
     if v >= 50:
-        return "background-color: #ffd43b"
-    return "background-color: #ff6b6b; color: white"
+        return "background-color: #ffd43b; color: #1a1a1a"
+    return "background-color: #ff6b6b; color: #1a1a1a"
+
+
+def _configured_opponent() -> str | None:
+    """Return ``fantrax.current_opponent`` from settings.yaml, or None.
+
+    Used only to pick the opponent dropdown's default. Missing file or key,
+    or a non-string/blank value, yields None so the caller falls back to the
+    first team rather than crashing.
+    """
+    try:
+        with open(CONFIG, encoding="utf-8") as f:
+            settings = yaml.safe_load(f) or {}
+        value = settings.get("fantrax", {}).get("current_opponent")
+        return value if isinstance(value, str) and value.strip() else None
+    except (OSError, yaml.YAMLError):
+        return None
+
+
+def _dash_missing(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce the literal string ``"None"`` to NaN so na_rep renders it as "-".
+
+    A roster player with no Statcast row (prospect/IL) can carry the string
+    ``"None"`` in a text column; the Styler's ``na_rep`` catches real NaN but
+    not that string. Only object columns are touched, so numeric formatting is
+    unaffected.
+    """
+    out = df.copy()
+    obj_cols = out.select_dtypes(include="object").columns
+    if len(obj_cols):
+        out[obj_cols] = out[obj_cols].replace("None", np.nan)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -244,8 +281,6 @@ def _render_matchup_overview():
     """Weekly Matchup Overview: head-to-head category comparison."""
     _PITCHER_POS = {"SP", "RP", "P"}
 
-    opponent_name = st.sidebar.text_input("Opponent Team Name", value="Ben")
-
     all_rosters = _load_all_rosters()
     my_roster_df = _load_my_roster_df()
     hitters_sc = _load_parquet(SILVER / "statcast_hitters.parquet")
@@ -254,6 +289,23 @@ def _render_matchup_overview():
     if any(x is None for x in [all_rosters, my_roster_df, hitters_sc, pitchers_sc]):
         st.warning("Missing data for matchup overview.")
         return
+
+    # Opponent picker: the real league teams from the roster data, minus my own.
+    # Default to config fantrax.current_opponent when set, else the first team.
+    opponent_choices = sorted(
+        t for t in all_rosters["team_name"].dropna().unique().tolist()
+        if t != MY_TEAM
+    )
+    if not opponent_choices:
+        st.info("No opponent teams found in roster data.")
+        return
+    configured = _configured_opponent()
+    default_idx = (
+        opponent_choices.index(configured) if configured in opponent_choices else 0
+    )
+    opponent_name = st.sidebar.selectbox(
+        "Opponent Team", opponent_choices, index=default_idx
+    )
 
     # Split opponent roster
     opp = all_rosters[all_rosters["team_name"].str.lower() == opponent_name.strip().lower()].copy()
@@ -353,9 +405,10 @@ def _render_matchup_overview():
         st.dataframe(
             comp_df.style.apply(
                 lambda col: [
-                    "background-color: #1a472a" if "My Edge" in v
-                    else "background-color: #5c1a1a" if "Opp Edge" in v
-                    else "background-color: #4a4a00" if "Close" in v
+                    # Dark backgrounds, so pair each with light text for contrast.
+                    "background-color: #1a472a; color: #f5f5f5" if "My Edge" in v
+                    else "background-color: #5c1a1a; color: #f5f5f5" if "Opp Edge" in v
+                    else "background-color: #4a4a00; color: #f5f5f5" if "Close" in v
                     else ""
                     for v in col
                 ] if col.name == "Edge" else [""] * len(col),
@@ -494,7 +547,7 @@ def page_session_prep():
                 h_display.append(gap_col)
 
             fmt = {c: "{:.3f}" for c in h_display if c not in ("player_name", "team", "position")}
-            styled_h = hit_df[h_display].style.format(fmt, na_rep="-")
+            styled_h = _dash_missing(hit_df[h_display]).style.format(fmt, na_rep="-")
             if gap_col in hit_df.columns:
                 styled_h = styled_h.map(_color_xwoba_gap, subset=[gap_col])
             st.dataframe(styled_h, use_container_width=True, hide_index=True,
@@ -522,7 +575,7 @@ def page_session_prep():
                 p_display.append(era_gap)
 
             fmt = {c: "{:.2f}" for c in p_display if c not in ("player_name", "team", "position")}
-            styled_p = pit_df[p_display].style.format(fmt, na_rep="-")
+            styled_p = _dash_missing(pit_df[p_display]).style.format(fmt, na_rep="-")
             if era_gap and era_gap in pit_df.columns:
                 styled_p = styled_p.map(_color_xwoba_gap, subset=[era_gap])
             st.dataframe(styled_p, use_container_width=True, hide_index=True,
@@ -613,7 +666,7 @@ def page_session_prep():
             show_cols = [c for c in ["player_name", "GP_week", "team", "position", "est_woba", "woba", "xwoba_minus_woba", "hard_hit_percentile", "barrel_percentile"] if c in bh.columns]
             fmt = {c: "{:.3f}" for c in show_cols if c not in ("player_name", "GP_week", "team", "position", "hard_hit_percentile", "barrel_percentile")}
             fmt.update({c: "{:.0f}" for c in show_cols if c in ("hard_hit_percentile", "barrel_percentile", "GP_week")})
-            st.dataframe(bh[show_cols].head(10).style.format(fmt, na_rep="-"), use_container_width=True, hide_index=True)
+            st.dataframe(_dash_missing(bh[show_cols].head(10)).style.format(fmt, na_rep="-"), use_container_width=True, hide_index=True)
 
     with col2:
         st.subheader("Top 10 Breakout Pitcher Adds")
@@ -626,7 +679,7 @@ def page_session_prep():
             fmt = {c: "{:.2f}" for c in show_cols if c not in ("player_name", "GP_week", "team", "position", "k_percent", "barrel_percentile")}
             fmt.update({c: "{:.1f}" for c in show_cols if c in ("k_percent", "barrel_percentile")})
             fmt.update({c: "{:.0f}" for c in show_cols if c in ("GP_week",)})
-            st.dataframe(bp[show_cols].head(10).style.format(fmt, na_rep="-"), use_container_width=True, hide_index=True)
+            st.dataframe(_dash_missing(bp[show_cols].head(10)).style.format(fmt, na_rep="-"), use_container_width=True, hide_index=True)
 
 
 def _breakout_style_maps():
