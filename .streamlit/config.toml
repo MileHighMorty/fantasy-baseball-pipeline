@@ -1,0 +1,10 @@
+# Global theme baseline. Palette mirrors dashboard/theme.py (the single source
+# of truth for hex values used in app code); keep the two in sync. Chrome stays
+# calm neutral charcoal — color lives in the data, not the frame.
+[theme]
+base = "dark"
+backgroundColor = "#0d0f12"          # BG  — near-black charcoal base
+secondaryBackgroundColor = "#16191d" # SURFACE — sidebar, cards, table headers
+primaryColor = "#4d9fff"             # ACCENT — refined blue, used sparingly
+textColor = "#e8eaed"                # TEXT — high-contrast primary
+font = "sans serif"

@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from gold.ownership import attach_status  # noqa: E402  (needs PROJECT_ROOT on path)
+from dashboard import theme  # noqa: E402  (design system: palette, chart theme, stylers)
 
 GOLD = PROJECT_ROOT / "gold" / "data"
 SILVER = PROJECT_ROOT / "silver" / "data"
@@ -213,33 +214,18 @@ def _last_refreshed() -> str | None:
 
 
 def _color_xwoba_gap(val):
-    """Styler function for xwoba-minus-woba gap magnitude."""
-    try:
-        gap = abs(float(val))
-    except (ValueError, TypeError):
-        return ""
-    # Light pastel backgrounds throughout, so pair each with dark text for
-    # contrast (white-on-coral was the unreadable case being fixed).
-    if gap > 0.050:
-        return "background-color: #ff6b6b; color: #1a1a1a"
-    if gap > 0.020:
-        return "background-color: #ffd43b; color: #1a1a1a"
-    return "background-color: #69db7c; color: #1a1a1a"
+    """Styler for xwoba-minus-woba gap magnitude (delegates to the theme)."""
+    return theme.gap_stability_style(val)
 
 
 def _score_color(val):
-    """Styler function for stream_score / generic 0-100 scores."""
-    try:
-        v = float(val)
-    except (ValueError, TypeError):
-        return ""
-    # Light pastel backgrounds throughout, so pair each with dark text for
-    # contrast (white-on-coral was the unreadable case being fixed).
-    if v > 70:
-        return "background-color: #69db7c; color: #1a1a1a"
-    if v >= 50:
-        return "background-color: #ffd43b; color: #1a1a1a"
-    return "background-color: #ff6b6b; color: #1a1a1a"
+    """Styler for stream_score / generic 0-100 scores (delegates to the theme)."""
+    return theme.score_style(val)
+
+
+def _edge_color(edge_text):
+    """Styler for the matchup Edge column (delegates to the theme)."""
+    return theme.edge_style(edge_text)
 
 
 def _configured_opponent() -> str | None:
@@ -404,20 +390,14 @@ def _render_matchup_overview():
         comp_df = pd.DataFrame(rows)
         st.dataframe(
             comp_df.style.apply(
-                lambda col: [
-                    # Dark backgrounds, so pair each with light text for contrast.
-                    "background-color: #1a472a; color: #f5f5f5" if "My Edge" in v
-                    else "background-color: #5c1a1a; color: #f5f5f5" if "Opp Edge" in v
-                    else "background-color: #4a4a00; color: #f5f5f5" if "Close" in v
-                    else ""
-                    for v in col
-                ] if col.name == "Edge" else [""] * len(col),
+                lambda col: [_edge_color(v) for v in col]
+                if col.name == "Edge" else [""] * len(col),
                 axis=0,
             ),
             use_container_width=True,
             hide_index=True,
         )
-        st.markdown(f"**Projected: {my_wins}-{opp_wins}**")
+        st.metric("Projected matchup", f"{my_wins}–{opp_wins}")
 
 
 def page_session_prep():
@@ -683,17 +663,17 @@ def page_session_prep():
 
 
 def _breakout_style_maps():
-    """Return shared color/symbol/opacity maps for breakout charts."""
-    _LEAGUE_TEAMS = LEAGUE_TEAMS
-    _TEAM_COLORS = [
-        "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c", "#3498db",
-        "#9b59b6", "#e84393", "#fd79a8", "#00cec9", "#6c5ce7", "#ffeaa7",
-    ]
-    color_map = {"FA": "#3498db"}
+    """Return shared color/symbol/opacity maps for owner-coloured charts.
+
+    Colours come from the single-source theme palette (muted, harmonized with
+    the dark frame; my team is the bright accent, FA a neutral gray) rather than
+    the old bright flat-UI set.
+    """
+    color_map = {"FA": theme.OWNER_COLORS["FA"]}
     symbol_map = {"FA": "circle"}
     opacity_map = {"FA": 1.0}
-    for i, team in enumerate(_LEAGUE_TEAMS):
-        color_map[team] = _TEAM_COLORS[i]
+    for team in LEAGUE_TEAMS:
+        color_map[team] = theme.OWNER_COLORS.get(team, theme.TEXT_MUTED)
         symbol_map[team] = "star" if team == MY_TEAM else "diamond"
         opacity_map[team] = 1.0 if team == MY_TEAM else 0.4
     return color_map, symbol_map, opacity_map
@@ -808,12 +788,17 @@ def _breakout_lens_scatter(
     # marker sizes — so size must use the absolute value for both player types.
     df["_size"] = df[gap].abs()
 
+    # Every point here is already a buy (single breakout lens); colour encodes
+    # only the STRENGTH of the buy, so it runs neutral->green by magnitude. A
+    # diverging red/green scale would wrongly paint the strongest pitcher buys
+    # (negative signed gap) red, so magnitude + a sequential-green scale is the
+    # semantically correct recolour of the old Plasma.
     fig = px.scatter(
         df, x=x, y=y,
-        color=gap, color_continuous_scale="Plasma",
+        color="_size", color_continuous_scale=theme.SEQUENTIAL_GOOD,
         size="_size", size_max=24,
         hover_name="player_name", hover_data={**hover, "_size": False},
-        labels={x: x_label, y: y_label, gap: "Gap off diagonal"},
+        labels={x: x_label, y: y_label, "_size": "Buy strength"},
         title=title,
     )
 
@@ -821,15 +806,15 @@ def _breakout_lens_scatter(
     hi = max(df[x].max(), df[y].max()) + diag_pad
     fig.add_trace(go.Scatter(
         x=[lo, hi], y=[lo, hi], mode="lines",
-        line=dict(dash="dash", color="white", width=2),
+        line=dict(dash="dash", color=theme.TEXT_MUTED, width=2),
         showlegend=False, name="x = y", hoverinfo="skip",
     ))
     fig.add_trace(go.Scatter(
         x=df[x], y=df[y] + label_dy, mode="text", text=df["_gap_label"],
-        textposition="top center", textfont=dict(size=11, color="white"),
+        textposition="top center", textfont=dict(size=11, color=theme.TEXT),
         showlegend=False, hoverinfo="skip",
     ))
-    fig.update_layout(height=620)
+    theme.apply_chart_theme(fig, height=620)
     return fig
 
 
@@ -975,7 +960,7 @@ def _stacked_panel(
 
     fig = px.scatter(
         sub, x=x, y=y,
-        color="buy_magnitude", color_continuous_scale="RdYlGn",
+        color="buy_magnitude", color_continuous_scale=theme.DIVERGING_SCALE,
         color_continuous_midpoint=0,
         symbol="group", symbol_map={"My Roster": "star", "Available (FA)": "circle"},
         size="_marker", size_max=16,
@@ -987,10 +972,10 @@ def _stacked_panel(
     hi = max(sub[x].max(), sub[y].max()) + diag_pad
     fig.add_trace(go.Scatter(
         x=[lo, hi], y=[lo, hi], mode="lines",
-        line=dict(dash="dash", color="gray", width=2),
+        line=dict(dash="dash", color=theme.TEXT_MUTED, width=2),
         showlegend=False, name="x = y", hoverinfo="skip",
     ))
-    fig.update_layout(height=600)
+    theme.apply_chart_theme(fig, height=600)
     st.plotly_chart(fig, use_container_width=True)
     return int(mine.sum()), int((~mine).sum())
 
@@ -1154,9 +1139,10 @@ def page_regression_watch():
             if "woba" in rh.columns and "est_woba" in rh.columns:
                 top10 = rh.head(10).copy()
                 fig = go.Figure()
-                fig.add_trace(go.Bar(name="wOBA (Actual)", x=top10["player_name"], y=top10["woba"]))
-                fig.add_trace(go.Bar(name="xwOBA (Expected)", x=top10["player_name"], y=top10["est_woba"]))
-                fig.update_layout(barmode="group", title="Top 10 Overperforming Hitters", height=400)
+                fig.add_trace(go.Bar(name="wOBA (Actual)", x=top10["player_name"], y=top10["woba"], marker_color=theme.ACCENT))
+                fig.add_trace(go.Bar(name="xwOBA (Expected)", x=top10["player_name"], y=top10["est_woba"], marker_color=theme.TEXT_MUTED))
+                fig.update_layout(barmode="group", title="Top 10 Overperforming Hitters")
+                theme.apply_chart_theme(fig, height=400)
                 st.plotly_chart(fig, use_container_width=True)
 
     with col2:
@@ -1184,32 +1170,25 @@ def page_regression_watch():
             if "era" in rp.columns and "xera" in rp.columns:
                 top10 = rp.head(10).copy()
                 fig = go.Figure()
-                fig.add_trace(go.Bar(name="ERA (Actual)", x=top10["player_name"], y=top10["era"]))
-                fig.add_trace(go.Bar(name="xERA (Expected)", x=top10["player_name"], y=top10["xera"]))
-                fig.update_layout(barmode="group", title="Top 10 Overperforming Pitchers", height=400)
+                fig.add_trace(go.Bar(name="ERA (Actual)", x=top10["player_name"], y=top10["era"], marker_color=theme.ACCENT))
+                fig.add_trace(go.Bar(name="xERA (Expected)", x=top10["player_name"], y=top10["xera"], marker_color=theme.TEXT_MUTED))
+                fig.update_layout(barmode="group", title="Top 10 Overperforming Pitchers")
+                theme.apply_chart_theme(fig, height=400)
                 st.plotly_chart(fig, use_container_width=True)
 
 
 def _ownership_color(val):
-    """Styler function for prospect ownership column."""
-    if val == "FA":
-        return "background-color: #69db7c; color: black"
-    if val == MY_TEAM:
-        return "background-color: #ffd43b; color: black"
-    return "background-color: #dee2e6; color: black"
+    """Styler for prospect ownership column (delegates to the theme)."""
+    return theme.ownership_style(val)
 
 
 def _upgrade_color(val):
-    """Styler function for net upgrade score — green > 15, yellow 10-15."""
-    try:
-        v = float(val)
-    except (ValueError, TypeError):
-        return ""
-    if v > 15:
-        return "background-color: #69db7c"
-    if v >= 10:
-        return "background-color: #ffd43b"
-    return ""
+    """Styler for net upgrade score (delegates to the theme).
+
+    The theme version always sets an explicit text color, fixing the old
+    no-text-color branches that would be unreadable on the dark base.
+    """
+    return theme.upgrade_style(val)
 
 
 def page_add_drop():
@@ -1340,28 +1319,22 @@ def page_prospect_pipeline():
     if "ownership" in display_df.columns:
         styled = styled.map(_ownership_color, subset=["ownership"])
 
-    # Highlight hot prospects
+    # Highlight hot prospects (subtle caution-amber row tint from the theme)
     if "is_hot" in prospects.columns:
-        def _highlight_hot(row):
-            is_hot_val = prospects.iloc[row.name].get("is_hot", False) if row.name < len(prospects) else False
-            if is_hot_val in (True, "True", "true", 1, "1"):
-                return ["background-color: #fff3e0"] * len(row)
-            return [""] * len(row)
-        # Only apply row highlight if hot column exists
         hot_mask = prospects["is_hot"].apply(lambda x: x in (True, "True", "true", 1, "1"))
         if hot_mask.any():
             def _hot_row_style(row):
                 idx = row.name
                 if idx in hot_mask.index and hot_mask.loc[idx]:
-                    return ["background-color: #fff3e0"] * len(row)
+                    return theme.hot_row_style(len(row))
                 return [""] * len(row)
             styled = styled.apply(_hot_row_style, axis=1)
 
-    # Highlight call-up candidates
+    # Highlight call-up candidates (subtle good-green row tint from the theme)
     if "callup_candidate" in display_df.columns:
         def _highlight_callup(row):
             if row.get("callup_candidate") in (True, "True", "true", 1, "1", "Yes", "yes"):
-                return ["background-color: #a9e34b"] * len(row)
+                return theme.callup_row_style(len(row))
             return [""] * len(row)
         styled = styled.apply(_highlight_callup, axis=1)
 
@@ -1385,6 +1358,10 @@ PAGES = {
 
 def main():
     st.set_page_config(page_title="Fantasy Baseball Pipeline", layout="wide")
+    # Single, centralized CSS block for what config.toml can't reach (the Inter
+    # face, heading weight/tracking, sidebar + metric polish). Driven by theme
+    # constants so colors are never hardcoded twice.
+    st.markdown(theme.CUSTOM_CSS, unsafe_allow_html=True)
 
     st.sidebar.title("Fantasy Baseball Pipeline")
     selection = st.sidebar.radio("Navigate", list(PAGES.keys()))
