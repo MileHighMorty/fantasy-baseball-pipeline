@@ -749,11 +749,17 @@ def _breakout_lens_scatter(
         if opt in df.columns:
             hover[opt] = True
 
+    # Marker size encodes the MAGNITUDE of the gap; direction (buy vs sell) is
+    # already carried by colour. The pitcher gap (xera-era) is negative for a
+    # breakout by the correct sign convention, and plotly rejects negative
+    # marker sizes — so size must use the absolute value for both player types.
+    df["_size"] = df[gap].abs()
+
     fig = px.scatter(
         df, x=x, y=y,
         color=gap, color_continuous_scale="Plasma",
-        size=gap, size_max=24,
-        hover_name="player_name", hover_data=hover,
+        size="_size", size_max=24,
+        hover_name="player_name", hover_data={**hover, "_size": False},
         labels={x: x_label, y: y_label, gap: "Gap off diagonal"},
         title=title,
     )
@@ -772,6 +778,56 @@ def _breakout_lens_scatter(
     ))
     fig.update_layout(height=620)
     return fig
+
+
+# SP-focus toggle for the pitcher views. SVH is punted and the league rewards
+# starter volume, so relievers are noise on the breakout/regression lists — the
+# full-Savant population floods them with RPs. The pitcher views default to
+# startable arms; "All pitchers" restores relievers. View-only: the gold CSVs
+# and parquets keep every reliever, this just filters what is plotted.
+PITCHER_SCOPE_STARTABLE = "Startable (SP/SP,RP)"
+PITCHER_SCOPE_ALL = "All pitchers"
+PITCHER_SCOPE_OPTIONS = [PITCHER_SCOPE_STARTABLE, PITCHER_SCOPE_ALL]
+
+
+def _pitcher_scope_toggle(key: str) -> str:
+    """Render the SP-focus radio and return the selected scope.
+
+    Keyed so the Breakout Board and Regression Watch toggles stay independent.
+
+    Args:
+        key: Unique Streamlit widget key for this instance of the toggle.
+
+    Returns:
+        The selected scope string (one of :data:`PITCHER_SCOPE_OPTIONS`).
+    """
+    return st.radio(
+        "Pitcher scope", PITCHER_SCOPE_OPTIONS, horizontal=True, key=key
+    )
+
+
+def _filter_startable(df: pd.DataFrame, scope: str) -> pd.DataFrame:
+    """Keep only startable pitchers when *scope* asks for it.
+
+    "Startable" keeps rows whose Fantrax ``position`` eligibility contains
+    "SP" (so "SP" and "SP,RP" stay, pure "RP" drops). One contains-"SP" test
+    serves both pitcher frames despite their different sourcing: the breakout
+    CSV's ``position`` is the post-ownership Fantrax string, the regression /
+    statcast frame's is the silver Statcast string, but both carry the same
+    SP/RP/SP,RP values. A NaN position is unresolved and treated as NOT
+    startable (dropped). Defensive: an absent ``position`` column or a None
+    frame is returned untouched rather than raising.
+
+    Args:
+        df: A pitcher frame (or None when the CSV/parquet is missing).
+        scope: The selected pitcher scope; only filters under "Startable".
+
+    Returns:
+        The filtered frame (or *df* unchanged when not filtering).
+    """
+    if df is None or scope != PITCHER_SCOPE_STARTABLE or "position" not in df.columns:
+        return df
+    return df[df["position"].str.contains("SP", na=False)]
 
 
 def _render_breakout_lens(df, own_value, lens, *, noun, required, **scatter_kwargs):
@@ -920,6 +976,12 @@ def _render_roster_vs_available():
     st.caption(f"My Roster: {nr} · Available: {nfa}")
 
     st.subheader("Pitchers — xERA vs ERA")
+    scope = _pitcher_scope_toggle("roster_vs_avail_pitcher_scope")
+    st.caption(
+        "Default shows startable pitchers (SP/SP,RP) — SVH is punted, so relievers "
+        "are noise. Switch to **All pitchers** to include relievers."
+    )
+    sp = _filter_startable(sp, scope)
     nr, nfa = _stacked_panel(
         attach_status(sp),
         x="xera", y="era", gap_col="xera_minus_era", invert_gap=True,
@@ -975,6 +1037,12 @@ def page_breakout_board():
     )
 
     st.subheader("Pitcher Breakout — xERA vs ERA")
+    scope = _pitcher_scope_toggle("breakout_pitcher_scope")
+    st.caption(
+        "Default shows startable pitchers (SP/SP,RP) — SVH is punted, so relievers "
+        "are noise. Switch to **All pitchers** to include relievers."
+    )
+    bp = _filter_startable(bp, scope)
     _render_breakout_lens(
         bp, own_value, lens, noun="pitcher",
         required={"xera", "era", "xera_minus_era", "ownership", "player_name"},
@@ -1046,7 +1114,13 @@ def page_regression_watch():
             "strand rate, BABIP against, or sequencing. Their stuff quality doesn't support "
             "the current ERA. Expect the ERA to rise."
         )
+        scope = _pitcher_scope_toggle("regression_pitcher_scope")
+        st.caption(
+            "Default shows startable pitchers (SP/SP,RP) — SVH is punted, so relievers "
+            "are noise. Switch to **All pitchers** to include relievers."
+        )
         rp = _load_csv(GOLD / "regression_pitchers.csv")
+        rp = _filter_startable(rp, scope)
         if rp is not None:
             gap_col = "xera_minus_era" if "xera_minus_era" in rp.columns else "era_minus_xera_diff"
             if gap_col in rp.columns:
