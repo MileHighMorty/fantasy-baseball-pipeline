@@ -21,11 +21,11 @@ record by record, which of those are the same security. The technique here is th
 same technique, applied to a domain where the answers are easy to eyeball and the
 failure modes are easy to demonstrate.
 
-![Roster vs Available: buy/sell heat map](docs/screenshots/roster-vs-available.png)
-*Lead view: every rostered player (★) and available free agent (●) on one gap
-heat map. Green means the underlying quality beats the surface results (buy);
-red means results are running ahead of quality (sell). All of it sits on top of
-the identity layer below.*
+![Breakout Board: Statcast quality vs results](docs/screenshots/breakout-board.png)
+*The Breakout Board plots underlying Statcast quality (xwOBA) against surface
+results (wOBA). Points above the diagonal are producing less than their contact
+quality says they should, so they read as buy-low. The free-agent lens shown here
+filters to players you can actually add.*
 
 ## Architecture
 
@@ -93,13 +93,20 @@ regression candidates, waiver-wire and add/drop rankings, starting-pitcher
 streaming picks, and prospect call-up watches. Analytical thresholds live in the
 gold modules alongside the logic that uses them.
 
+![Add/Drop suggestions](docs/screenshots/add-drop.png)
+*Suggested roster moves. For each position it compares my weakest rostered player
+against the best available free agent by their underlying Statcast metrics, then
+flags the swaps worth making.*
+
 A **Streamlit dashboard** sits on top with six pages: Session Prep, Breakout
 Board, SP Streaming, Regression Watch, Add/Drop Suggestions, and Prospect
 Pipeline.
 
-![Session Prep: roster health and matchup](docs/screenshots/session-prep.png)
-*Session Prep: weekly matchup projection plus per-player expected-vs-actual gaps
-for the current roster.*
+![Session Prep: Roster Strength Comparison](docs/screenshots/session-prep.png)
+*Session Prep's Roster Strength Comparison. Season-to-date production of my roster
+against a selected opponent across the nine scoring categories, with the rate
+stats weighted correctly (OBP by plate appearances, ERA and WHIP by innings). It
+measures overall roster strength, not a projected weekly score.*
 
 ## The identity-resolution layer
 
@@ -131,6 +138,11 @@ buckets: a near-miss where a real counterpart almost certainly exists, a
 lower-confidence near-name that is often coincidental, and a genuine
 "no candidate in this source" (a prospect, an IL stash, or a player below the
 leaderboard's qualification floor).
+
+![Roster health: expected vs actual gaps](docs/screenshots/roster-health.png)
+*Per-player expected-vs-actual gaps (xwOBA minus wOBA) across the rostered
+hitters. Every player here is matched back to a team and a stat line through the
+identity layer, including the ones the qualified leaderboards miss.*
 
 ### Manual overrides that both force and block
 
@@ -261,9 +273,11 @@ one. Individual module failures are caught and logged without killing the rest o
 the run. The build is developed on Windows with PowerShell; the virtual
 environment is `venv`, not `.venv`.
 
-![SP Streaming picks](docs/screenshots/sp-streaming.png)
-*SP Streaming: starting pitchers ranked by a weighted blend of expected ERA,
-strikeout rate, and opponent weakness.*
+![Regression Watch: my roster](docs/screenshots/regression-watch.png)
+*Regression Watch, filtered to my own roster. These are my players whose results
+are running ahead of their underlying metrics, so they read as sell-high or
+hold-with-caution. When none of my hitters are flagged it says so instead of
+padding the list with other teams' players.*
 
 ## Design decisions, known limitations, and next steps
 
