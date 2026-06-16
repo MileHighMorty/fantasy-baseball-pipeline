@@ -3,6 +3,7 @@ pybaseball
 pandas
 pyarrow
 requests
+curl_cffi
 pyyaml
 python-dotenv
 streamlit
