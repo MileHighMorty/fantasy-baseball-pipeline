@@ -138,6 +138,30 @@ def _fuzzy_merge(
     return pd.concat([base, extra], axis=1)
 
 
+@st.cache_data(ttl=3600)
+def _load_fangraphs_stats() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load per-player FanGraphs batting and pitching stat columns for the matchup board.
+
+    Pulls only the columns the 9-category aggregation needs, each keyed by
+    ``IDfg`` for an id-map join. Counting stats are season totals; ``OBP`` /
+    ``ERA`` / ``WHIP`` are per-player rates weighted at aggregation time.
+
+    Returns:
+        ``(batting, pitching)``. Either is an empty frame (correct columns)
+        when its CSV is absent, so callers never KeyError.
+    """
+    bat_cols = ["IDfg", "HR", "R", "RBI", "SB", "OBP", "PA"]
+    pit_cols = ["IDfg", "SO", "W", "ERA", "WHIP", "IP", "SV"]
+
+    def _latest(pattern: str, cols: list[str]) -> pd.DataFrame:
+        files = sorted(FANGRAPHS.glob(pattern))
+        if not files:
+            return pd.DataFrame(columns=cols)
+        return pd.read_csv(files[-1], usecols=lambda c: c in cols)
+
+    return _latest("*_batting.csv", bat_cols), _latest("*_pitching.csv", pit_cols)
+
+
 def _load_fangraphs_team_pos() -> pd.DataFrame:
     """Load team and position info from FanGraphs batting + pitching CSVs."""
     frames = []
@@ -277,15 +301,134 @@ def _dash_missing(df: pd.DataFrame) -> pd.DataFrame:
 # Pages
 # ---------------------------------------------------------------------------
 
-def _render_matchup_overview():
-    """Weekly Matchup Overview: head-to-head category comparison."""
-    all_rosters = _load_all_rosters()
-    my_roster_df = _load_my_roster_df()
-    hitters_sc = _load_parquet(SILVER / "statcast_hitters.parquet")
-    pitchers_sc = _load_parquet(SILVER / "statcast_pitchers.parquet")
+# "Close" margins for the matchup edge call, as named constants rather than
+# magic numbers. Counting categories use a relative margin (a 1-HR gap on 80 is
+# noise); rate categories use absolute margins on their natural scale.
+_CLOSE_COUNTING_PCT = 0.03   # within 3% of the larger total → Close
+_CLOSE_OBP = 0.005           # OBP points
+_CLOSE_ERA = 0.20            # earned runs / 9
+_CLOSE_WHIP = 0.03           # baserunners / IP
 
-    if any(x is None for x in [all_rosters, my_roster_df, hitters_sc, pitchers_sc]):
-        st.warning("Missing data for matchup overview.")
+
+def _aggregate_hitting(
+    roster: pd.DataFrame, fg_batting: pd.DataFrame, id_map: pd.DataFrame | None
+) -> tuple[dict, int, int]:
+    """Aggregate a roster's hitters into the five hitting categories.
+
+    Splits to hitters first (so a pitcher's near-empty qual=0 batting row never
+    pollutes the totals), joins to FanGraphs by ``fangraphs_id``, SUMs the
+    counting stats, and PA-weights OBP — ``Σ(OBP*PA)/Σ PA``, the pooled team
+    OBP, not a naive mean. Unresolved hitters (no FanGraphs row) drop out via
+    skipna sums rather than breaking the aggregate.
+
+    Args:
+        roster: A team's rows with a ``player_type`` column.
+        fg_batting: FanGraphs batting stats keyed by ``IDfg``.
+        id_map: The player ID map (``player_name`` → ``fangraphs_id``).
+
+    Returns:
+        ``(totals, n_resolved, n_hitters)`` where totals has HR/R/RBI/SB/OBP.
+    """
+    hitters = roster[roster["player_type"] == "Hitter"]
+    n_hitters = len(hitters)
+    empty = {"HR": 0, "R": 0, "RBI": 0, "SB": 0, "OBP": np.nan}
+    if id_map is None or fg_batting.empty or n_hitters == 0:
+        return empty, 0, n_hitters
+
+    idm = id_map[["player_name", "fangraphs_id"]].drop_duplicates("player_name")
+    joined = hitters.merge(idm, on="player_name", how="left").merge(
+        fg_batting, left_on="fangraphs_id", right_on="IDfg", how="left"
+    )
+    resolved = joined[joined["IDfg"].notna()]
+    n_resolved = len(resolved)
+
+    pa = resolved["PA"].sum()
+    obp = (resolved["OBP"] * resolved["PA"]).sum() / pa if pa > 0 else np.nan
+    totals = {
+        "HR": resolved["HR"].sum(),
+        "R": resolved["R"].sum(),
+        "RBI": resolved["RBI"].sum(),
+        "SB": resolved["SB"].sum(),
+        "OBP": obp,
+    }
+    return totals, n_resolved, n_hitters
+
+
+def _aggregate_pitching(
+    roster: pd.DataFrame, fg_pitching: pd.DataFrame, id_map: pd.DataFrame | None
+) -> tuple[dict, int, int]:
+    """Aggregate a roster's pitchers into the four computed pitching categories.
+
+    Splits to pitchers first, joins to FanGraphs by ``fangraphs_id``, SUMs K
+    (``SO``) and W, and IP-weights ERA and WHIP — ``Σ(rate*IP)/Σ IP``. That
+    weighting is exact, not an approximation: since ``ER = ERA*IP/9`` and
+    ``BB+H = WHIP*IP``, the IP-weighted mean equals the pooled ``Σ ER /Σ IP *9``
+    and ``Σ(BB+H)/Σ IP`` despite the raw ER/BB/H columns being absent. Saves are
+    summed for the (punted) SVH row's context.
+
+    Args:
+        roster: A team's rows with a ``player_type`` column.
+        fg_pitching: FanGraphs pitching stats keyed by ``IDfg``.
+        id_map: The player ID map (``player_name`` → ``fangraphs_id``).
+
+    Returns:
+        ``(totals, n_resolved, n_pitchers)`` where totals has K/W/ERA/WHIP/SV.
+    """
+    pitchers = roster[roster["player_type"] == "Pitcher"]
+    n_pitchers = len(pitchers)
+    empty = {"K": 0, "W": 0, "ERA": np.nan, "WHIP": np.nan, "SV": 0}
+    if id_map is None or fg_pitching.empty or n_pitchers == 0:
+        return empty, 0, n_pitchers
+
+    idm = id_map[["player_name", "fangraphs_id"]].drop_duplicates("player_name")
+    joined = pitchers.merge(idm, on="player_name", how="left").merge(
+        fg_pitching, left_on="fangraphs_id", right_on="IDfg", how="left"
+    )
+    resolved = joined[joined["IDfg"].notna()]
+    n_resolved = len(resolved)
+
+    ip = resolved["IP"].sum()
+    era = (resolved["ERA"] * resolved["IP"]).sum() / ip if ip > 0 else np.nan
+    whip = (resolved["WHIP"] * resolved["IP"]).sum() / ip if ip > 0 else np.nan
+    totals = {
+        "K": resolved["SO"].sum(),
+        "W": resolved["W"].sum(),
+        "ERA": era,
+        "WHIP": whip,
+        "SV": resolved["SV"].sum(),
+    }
+    return totals, n_resolved, n_pitchers
+
+
+def _category_edge(my_val: float, opp_val: float, higher_better: bool, margin: float) -> str:
+    """Return the styled edge label for one category.
+
+    ``margin`` is the absolute "too close to call" band. A missing value (no
+    resolved players on a side) yields Close rather than a false edge.
+    """
+    if pd.isna(my_val) or pd.isna(opp_val):
+        return "⚠️ Close"
+    if abs(my_val - opp_val) <= margin:
+        return "⚠️ Close"
+    my_better = my_val > opp_val if higher_better else my_val < opp_val
+    return "✅ My Edge" if my_better else "❌ Opp Edge"
+
+
+def _render_matchup_overview():
+    """Roster Strength Comparison: season-to-date OBP 5x5 board, my team vs opponent.
+
+    Both rosters come from all_rosters and are aggregated against the live
+    FanGraphs (qual=0) stats via the id map. Counting categories are summed,
+    OBP/ERA/WHIP are sample-weighted, and SVH is conceded (punt strategy). The
+    figures are season-to-date production — a roster-strength comparison, not a
+    projected weekly result.
+    """
+    all_rosters = _load_all_rosters()
+    fg_batting, fg_pitching = _load_fangraphs_stats()
+    id_map = _load_id_map()
+
+    if all_rosters is None or fg_batting.empty or fg_pitching.empty:
+        st.warning("Missing data for roster strength comparison.")
         return
 
     # Opponent picker: the real league teams from the roster data, minus my own.
@@ -305,100 +448,82 @@ def _render_matchup_overview():
         "Opponent Team", opponent_choices, index=default_idx
     )
 
-    # Split opponent roster
-    opp = all_rosters[all_rosters["team_name"].str.lower() == opponent_name.strip().lower()].copy()
-    if opp.empty:
-        st.info(f"No roster found for '{opponent_name}'.")
+    def _team_roster(name: str) -> pd.DataFrame:
+        """One team's roster rows from all_rosters, tagged hitter/pitcher."""
+        r = all_rosters[
+            all_rosters["team_name"].str.lower() == name.strip().lower()
+        ].copy()
+        r["player_name"] = r["player_name"].str.strip()
+        r["player_type"] = r["position"].apply(
+            lambda p: "Pitcher" if _is_pitcher(p) else "Hitter"
+        )
+        return r
+
+    my_roster = _team_roster(MY_TEAM)
+    opp_roster = _team_roster(opponent_name)
+    if my_roster.empty or opp_roster.empty:
+        st.info("Could not load both rosters for the matchup.")
         return
-    opp["player_name"] = opp["player_name"].str.strip()
-    opp["player_type"] = opp["position"].apply(
-        lambda p: "Pitcher" if _is_pitcher(p) else "Hitter"
-    )
 
-    # Split my roster
-    my = my_roster_df.copy()
-    my = my[my["player_name"].notna() & (my["player_name"] != "None")]
-    my["player_type"] = my["fantrax_position"].apply(
-        lambda p: "Pitcher" if _is_pitcher(p) else "Hitter"
-    )
+    my_h, my_h_n, my_h_tot = _aggregate_hitting(my_roster, fg_batting, id_map)
+    opp_h, opp_h_n, opp_h_tot = _aggregate_hitting(opp_roster, fg_batting, id_map)
+    my_p, my_p_n, my_p_tot = _aggregate_pitching(my_roster, fg_pitching, id_map)
+    opp_p, opp_p_n, opp_p_tot = _aggregate_pitching(opp_roster, fg_pitching, id_map)
 
-    id_map = _load_id_map()
+    def _count_margin(a: float, b: float) -> float:
+        """Relative close-band for a counting category (3% of the larger side)."""
+        return _CLOSE_COUNTING_PCT * max(a, b, 1)
 
-    def _match_names_to_statcast(names: list[str], statcast_df: pd.DataFrame) -> pd.DataFrame:
-        """Match player names to statcast data via ID map (savant_player_id join)."""
-        if id_map is not None and "savant_player_id" in statcast_df.columns:
-            idm = id_map[["player_name", "savant_player_id"]].drop_duplicates(
-                subset=["player_name"], keep="first"
-            )
-            name_df = pd.DataFrame({"player_name": names})
-            joined = name_df.merge(idm, on="player_name", how="inner")
-            result = joined.merge(statcast_df, on="savant_player_id", how="inner", suffixes=("", "_sc"))
-            if "player_name_sc" in result.columns:
-                result = result.drop(columns=["player_name_sc"])
-            return result
-        # Fallback: fuzzy match
-        sc_names = statcast_df["player_name"].dropna().unique().tolist()
-        rows = []
-        for name in names:
-            res = process.extractOne(name, sc_names, scorer=fuzz.token_sort_ratio, score_cutoff=FUZZY_THRESHOLD)
-            if res:
-                rows.append(statcast_df[statcast_df["player_name"] == res[0]].iloc[0])
-        return pd.DataFrame(rows) if rows else pd.DataFrame()
-
-    my_h = _match_names_to_statcast(my[my["player_type"] == "Hitter"]["player_name"].tolist(), hitters_sc)
-    opp_h = _match_names_to_statcast(opp[opp["player_type"] == "Hitter"]["player_name"].tolist(), hitters_sc)
-    my_p = _match_names_to_statcast(my[my["player_type"] == "Pitcher"]["player_name"].tolist(), pitchers_sc)
-    opp_p = _match_names_to_statcast(opp[opp["player_type"] == "Pitcher"]["player_name"].tolist(), pitchers_sc)
-
-    # Build category comparisons
-    def _safe(val, fmt=".3f"):
-        return f"{val:{fmt}}" if pd.notna(val) else "N/A"
-
-    my_hr = int((my_h["barrel_percentile"] > 50).sum()) if not my_h.empty else 0
-    opp_hr = int((opp_h["barrel_percentile"] > 50).sum()) if not opp_h.empty else 0
-
-    my_sb = int((my_h["sprint_speed"] > 28).sum()) if not my_h.empty and "sprint_speed" in my_h.columns else 0
-    opp_sb = int((opp_h["sprint_speed"] > 28).sum()) if not opp_h.empty and "sprint_speed" in opp_h.columns else 0
-
-    my_obp = my_h["est_woba"].mean() if not my_h.empty else np.nan
-    opp_obp = opp_h["est_woba"].mean() if not opp_h.empty else np.nan
-
-    my_k = len(my_p) if not my_p.empty else 0
-    opp_k = len(opp_p) if not opp_p.empty else 0
-
-    my_era = my_p["xera"].mean() if not my_p.empty else np.nan
-    opp_era = opp_p["xera"].mean() if not opp_p.empty else np.nan
-
-    # Detect RPs
-    opp_rp_names = opp[opp["position"] == "RP"]["player_name"].tolist()
-    opp_rp_count = len(opp_rp_names)
-
-    categories = [
-        ("HR (barrel%ile>50)", str(my_hr), str(opp_hr), my_hr - opp_hr),
-        ("SB (speed>28)", str(my_sb), str(opp_sb), my_sb - opp_sb),
-        ("OBP (avg xwOBA)", _safe(my_obp), _safe(opp_obp),
-         (my_obp - opp_obp) if pd.notna(my_obp) and pd.notna(opp_obp) else 0),
-        ("K (SP count)", str(my_k), str(opp_k), my_k - opp_k),
-        ("ERA (avg xERA)", _safe(my_era), _safe(opp_era),
-         (opp_era - my_era) if pd.notna(my_era) and pd.notna(opp_era) else 0),  # lower is better
-        ("SVH", "PUNT", str(opp_rp_count) + " RPs", -1),  # always red
+    # (label, my, opp, higher_better, margin, value-format)
+    specs = [
+        ("HR", my_h["HR"], opp_h["HR"], True, _count_margin(my_h["HR"], opp_h["HR"]), "int"),
+        ("R", my_h["R"], opp_h["R"], True, _count_margin(my_h["R"], opp_h["R"]), "int"),
+        ("RBI", my_h["RBI"], opp_h["RBI"], True, _count_margin(my_h["RBI"], opp_h["RBI"]), "int"),
+        ("SB", my_h["SB"], opp_h["SB"], True, _count_margin(my_h["SB"], opp_h["SB"]), "int"),
+        ("OBP", my_h["OBP"], opp_h["OBP"], True, _CLOSE_OBP, "obp"),
+        ("K", my_p["K"], opp_p["K"], True, _count_margin(my_p["K"], opp_p["K"]), "int"),
+        ("W", my_p["W"], opp_p["W"], True, _count_margin(my_p["W"], opp_p["W"]), "int"),
+        ("ERA", my_p["ERA"], opp_p["ERA"], False, _CLOSE_ERA, "rate2"),
+        ("WHIP", my_p["WHIP"], opp_p["WHIP"], False, _CLOSE_WHIP, "rate2"),
     ]
 
-    rows = []
-    my_wins = 0
-    opp_wins = 0
-    for cat, my_val, opp_val, diff in categories:
-        if diff > 0.001:
-            edge = "✅ My Edge"
-            my_wins += 1
-        elif diff < -0.001:
-            edge = "❌ Opp Edge"
-            opp_wins += 1
-        else:
-            edge = "⚠️ Close"
-        rows.append({"Category": cat, "My Team": my_val, opponent_name: opp_val, "Edge": edge})
+    def _fmt(val, kind: str) -> str:
+        if pd.isna(val):
+            return "—"
+        if kind == "int":
+            return f"{val:.0f}"
+        if kind == "obp":
+            return f"{val:.3f}"
+        return f"{val:.2f}"
 
-    with st.expander("Weekly Matchup Overview", expanded=True):
+    rows = []
+    my_wins = opp_wins = 0
+    for label, mv, ov, higher_better, margin, kind in specs:
+        edge = _category_edge(mv, ov, higher_better, margin)
+        if "My Edge" in edge:
+            my_wins += 1
+        elif "Opp Edge" in edge:
+            opp_wins += 1
+        rows.append({
+            "Category": label, "My Team": _fmt(mv, kind),
+            opponent_name: _fmt(ov, kind), "Edge": edge,
+        })
+
+    # SVH is punted: we concede it. Show opponent's save total as context.
+    rows.append({
+        "Category": "SVH", "My Team": "PUNT",
+        opponent_name: f"{opp_p['SV']:.0f} SV", "Edge": "❌ Opp Edge",
+    })
+    opp_wins += 1
+
+    with st.expander("Roster Strength Comparison", expanded=True):
+        st.caption(
+            "Season-to-date production of each roster's players, by category. "
+            "This compares overall roster strength — whose team has produced more "
+            "this season — not a projected weekly result. Counting rows are "
+            "season-to-date totals; OBP/ERA/WHIP are season-to-date rates "
+            "(OBP PA-weighted, ERA/WHIP IP-weighted)."
+        )
         comp_df = pd.DataFrame(rows)
         st.dataframe(
             comp_df.style.apply(
@@ -409,7 +534,23 @@ def _render_matchup_overview():
             use_container_width=True,
             hide_index=True,
         )
-        st.metric("Projected matchup", f"{my_wins}–{opp_wins}")
+        # Season-long edge per category, NOT a projected weekly score: how many
+        # of the nine computed categories my roster currently leads.
+        st.metric("Season-to-date roster edge", f"Stronger in {my_wins} of 9 categories")
+        # Coverage honesty: counting categories only include players that resolve
+        # to a FanGraphs row, so make the denominator visible per side.
+        st.caption(
+            f"Hitting totals from {my_h_n}/{my_h_tot} (me) and "
+            f"{opp_h_n}/{opp_h_tot} ({opponent_name}) rostered hitters; "
+            f"pitching from {my_p_n}/{my_p_tot} and {opp_p_n}/{opp_p_tot} pitchers. "
+            "Unresolved bench/injured/minor-league players are excluded from "
+            "counting totals."
+        )
+        st.caption(
+            "Season-to-date roster comparison. A true rest-of-week matchup "
+            "projection (games remaining × per-game rates, probable starters) "
+            "is a planned enhancement."
+        )
 
 
 def page_session_prep():
@@ -422,7 +563,7 @@ def page_session_prep():
     else:
         st.warning("No data files found in gold/data/")
 
-    # --- Weekly Matchup Overview ---
+    # --- Roster Strength Comparison ---
     _render_matchup_overview()
 
     # --- My Roster Health ---
@@ -1052,6 +1193,7 @@ def page_breakout_board():
         "Lens",
         ["My Roster", "Available (FA)", "Trade Targets", "Roster vs Available"],
         horizontal=True,
+        index=1,  # default to Available (FA): buy-low adds are the most actionable view
     )
 
     # New stacked view: separate loader + render path, so an incomplete version
@@ -1125,44 +1267,66 @@ def page_sp_streaming():
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
+def _my_roster_only(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter a stats frame to MY rostered players via resolved vendor-id ownership.
+
+    Uses :func:`attach_status` (savant/fangraphs id join through the id map) —
+    the same ownership resolution the breakout board uses — so the filter is
+    identity-based, never name matching. Returns only rows the id map resolves
+    to ``status == "owned"`` on my fantasy team.
+    """
+    attached = attach_status(df)
+    return attached[
+        (attached["status"] == "owned")
+        & (attached["fantrax_team_name"] == MY_TEAM)
+    ]
+
+
 def page_regression_watch():
     st.header("Regression Watch")
+    st.caption(
+        "Your rostered players whose results are outrunning their underlying "
+        "Statcast metrics — sell-high or hold-with-caution candidates. Only your "
+        "roster is shown; other teams' regression is not your concern."
+    )
 
     col1, col2 = st.columns(2)
 
     with col1:
         st.subheader("Hitters")
         st.caption(
-            "These players have actual results significantly better than their underlying "
-            "Statcast metrics suggest. A large negative xwOBA gap means their batting average, "
-            "home runs, or OBP are inflated by luck (high BABIP, unsustainable HR/FB rate). "
-            "Consider selling high in trades before regression hits."
+            "Actual results significantly better than the underlying Statcast metrics "
+            "suggest — a large negative xwOBA gap means the line is inflated by luck "
+            "(high BABIP, unsustainable HR/FB). Sell-high or hold-with-caution."
         )
         rh = _load_csv(GOLD / "regression_hitters.csv")
         if rh is not None:
-            gap_col = "xwoba_minus_woba" if "xwoba_minus_woba" in rh.columns else "est_woba_minus_woba_diff"
-            if gap_col in rh.columns:
-                rh = rh.sort_values(gap_col, ascending=True)  # most negative = biggest overperformer
-            show_cols = [c for c in ["player_name", "team", "position", "woba", "est_woba", gap_col] if c in rh.columns]
-            st.dataframe(rh[show_cols], use_container_width=True, hide_index=True)
+            rh = _my_roster_only(rh)
+            if rh.empty:
+                st.info("No significant regression flags on your roster right now.")
+            else:
+                gap_col = "xwoba_minus_woba" if "xwoba_minus_woba" in rh.columns else "est_woba_minus_woba_diff"
+                if gap_col in rh.columns:
+                    rh = rh.sort_values(gap_col, ascending=True)  # most negative = biggest overperformer
+                show_cols = [c for c in ["player_name", "team", "position", "woba", "est_woba", gap_col] if c in rh.columns]
+                st.dataframe(rh[show_cols], use_container_width=True, hide_index=True)
 
-            # Bar chart — top 10 overperformers
-            if "woba" in rh.columns and "est_woba" in rh.columns:
-                top10 = rh.head(10).copy()
-                fig = go.Figure()
-                fig.add_trace(go.Bar(name="wOBA (Actual)", x=top10["player_name"], y=top10["woba"], marker_color=theme.ACCENT))
-                fig.add_trace(go.Bar(name="xwOBA (Expected)", x=top10["player_name"], y=top10["est_woba"], marker_color=theme.TEXT_MUTED))
-                fig.update_layout(barmode="group", title="Top 10 Overperforming Hitters")
-                theme.apply_chart_theme(fig, height=400)
-                st.plotly_chart(fig, use_container_width=True)
+                # Bar chart — my regressing hitters (the curated set, not a top-10 cut)
+                if "woba" in rh.columns and "est_woba" in rh.columns:
+                    chart = rh.head(10).copy()
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(name="wOBA (Actual)", x=chart["player_name"], y=chart["woba"], marker_color=theme.ACCENT))
+                    fig.add_trace(go.Bar(name="xwOBA (Expected)", x=chart["player_name"], y=chart["est_woba"], marker_color=theme.TEXT_MUTED))
+                    fig.update_layout(barmode="group", title="My Overperforming Hitters")
+                    theme.apply_chart_theme(fig, height=400)
+                    st.plotly_chart(fig, use_container_width=True)
 
     with col2:
         st.subheader("Pitchers")
         st.caption(
-            "These pitchers have ERAs significantly lower than their expected ERA (xERA). "
-            "A large positive xERA-minus-ERA gap means they've been getting lucky with "
-            "strand rate, BABIP against, or sequencing. Their stuff quality doesn't support "
-            "the current ERA. Expect the ERA to rise."
+            "ERAs significantly lower than expected ERA (xERA) — a large positive "
+            "xERA-minus-ERA gap means luck with strand rate, BABIP, or sequencing the "
+            "stuff doesn't support. Expect the ERA to rise."
         )
         scope = _pitcher_scope_toggle("regression_pitcher_scope")
         st.caption(
@@ -1172,20 +1336,24 @@ def page_regression_watch():
         rp = _load_csv(GOLD / "regression_pitchers.csv")
         rp = _filter_startable(rp, scope)
         if rp is not None:
-            gap_col = "xera_minus_era" if "xera_minus_era" in rp.columns else "era_minus_xera_diff"
-            if gap_col in rp.columns:
-                rp = rp.sort_values(gap_col, ascending=False)  # most positive = luckiest overperformer (ERA below xERA)
-            show_cols = [c for c in ["player_name", "team", "position", "era", "xera", gap_col] if c in rp.columns]
-            st.dataframe(rp[show_cols], use_container_width=True, hide_index=True)
+            rp = _my_roster_only(rp)
+            if rp.empty:
+                st.info("No significant regression flags on your roster right now.")
+            else:
+                gap_col = "xera_minus_era" if "xera_minus_era" in rp.columns else "era_minus_xera_diff"
+                if gap_col in rp.columns:
+                    rp = rp.sort_values(gap_col, ascending=False)  # most positive = luckiest overperformer (ERA below xERA)
+                show_cols = [c for c in ["player_name", "team", "position", "era", "xera", gap_col] if c in rp.columns]
+                st.dataframe(rp[show_cols], use_container_width=True, hide_index=True)
 
-            if "era" in rp.columns and "xera" in rp.columns:
-                top10 = rp.head(10).copy()
-                fig = go.Figure()
-                fig.add_trace(go.Bar(name="ERA (Actual)", x=top10["player_name"], y=top10["era"], marker_color=theme.ACCENT))
-                fig.add_trace(go.Bar(name="xERA (Expected)", x=top10["player_name"], y=top10["xera"], marker_color=theme.TEXT_MUTED))
-                fig.update_layout(barmode="group", title="Top 10 Overperforming Pitchers")
-                theme.apply_chart_theme(fig, height=400)
-                st.plotly_chart(fig, use_container_width=True)
+                if "era" in rp.columns and "xera" in rp.columns:
+                    chart = rp.head(10).copy()
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(name="ERA (Actual)", x=chart["player_name"], y=chart["era"], marker_color=theme.ACCENT))
+                    fig.add_trace(go.Bar(name="xERA (Expected)", x=chart["player_name"], y=chart["xera"], marker_color=theme.TEXT_MUTED))
+                    fig.update_layout(barmode="group", title="My Overperforming Pitchers")
+                    theme.apply_chart_theme(fig, height=400)
+                    st.plotly_chart(fig, use_container_width=True)
 
 
 def _ownership_color(val):
