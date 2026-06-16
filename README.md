@@ -33,6 +33,13 @@ The pipeline follows a bronze/silver/gold medallion design. Raw data lands in
 bronze untouched, silver resolves identity and enriches, and gold produces the
 decision outputs the dashboard reads.
 
+![Architecture: bronze to silver to gold to dashboard](docs/screenshots/architecture.png)
+*The medallion flow. Bronze pulls raw data, silver resolves player identity across
+sources, gold turns the enriched data into decisions, and the dashboard reads gold.*
+
+Static render above. The Mermaid source follows for anyone who wants to read or
+edit it.
+
 ```mermaid
 flowchart LR
     subgraph Bronze["Bronze: raw pulls"]
