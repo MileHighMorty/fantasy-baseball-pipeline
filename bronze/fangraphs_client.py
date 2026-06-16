@@ -135,7 +135,7 @@ def _fetch_leaderboard(stats: str, season: int) -> list[dict]:
         "pos": "all",
         "stats": stats,
         "lg": "all",
-        "qual": "y",
+        "qual": "0",
         "season": str(season),
         "season1": str(season),
         "ind": "0",

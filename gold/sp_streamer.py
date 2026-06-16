@@ -44,6 +44,17 @@ WEIGHTS = {
 
 TOP_N = 25
 
+# Minimum plate appearances for a batter to count toward a team's offensive
+# profile. The qual=0 FanGraphs pull includes a long tail of sub-sample players
+# (pitchers with a stray PA, brief call-ups) whose extreme rate stats would drag
+# a team's mean wRC+/K%; a 50-PA floor keeps the per-team average on real
+# contributors so opponent-weakness scoring reflects the actual lineup.
+MIN_PA_FOR_OFFENSE = 50
+
+# Season-aggregate pseudo-teams FanGraphs emits for players who changed teams
+# mid-season. Not a real club, so excluded from the per-team offense table.
+MULTI_TEAM_LABELS = ("2 Tms", "3 Tms")
+
 # ── team-name mapping (MLB full name → 3-letter code) ───────────────
 
 TEAM_ABBREV = {
@@ -126,6 +137,14 @@ def load_team_batting(today: str) -> pd.DataFrame:
     # Convert K% from string-like fraction to float if needed
     if raw["K%"].dtype == object:
         raw["K%"] = raw["K%"].str.rstrip("%").astype(float) / 100
+
+    # Real-sample floor: drop the qual=0 sub-sample tail and the season-aggregate
+    # multi-team pseudo-rows before averaging, so a team's offensive profile
+    # reflects its actual contributors rather than noise.
+    raw = raw[
+        (raw["PA"] >= MIN_PA_FOR_OFFENSE)
+        & (~raw["Team"].isin(MULTI_TEAM_LABELS))
+    ]
 
     team_stats = (
         raw.groupby("Team")
