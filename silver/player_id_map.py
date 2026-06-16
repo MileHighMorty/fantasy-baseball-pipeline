@@ -86,6 +86,32 @@ HIGH_CONFIDENCE_FLOOR = 85
 _PITCHER_POSITIONS = {"SP", "RP", "P"}
 _STAT_TYPE_TO_PLAYER_TYPE = {"batting": "Hitter", "pitching": "Pitcher"}
 
+# Fantrax MLB-team abbreviations that differ from FanGraphs/Savant convention.
+# Used when falling back to the Fantrax team for a FanGraphs-absent player, so
+# the id_map's team column stays internally consistent (mirrors the dashboard's
+# _MLB_TO_SAVANT_ABBR). Only the five abbreviations that actually diverge in the
+# data are listed; every other team already agrees across both sources.
+_FANTRAX_TEAM_TO_FG = {
+    "KC": "KCR", "SD": "SDP", "SF": "SFG", "TB": "TBR", "WSH": "WSN",
+}
+
+
+def _normalize_fantrax_team(raw: str | None) -> str | None:
+    """Return a Fantrax MLB-team abbreviation in FanGraphs/Savant convention.
+
+    Maps the five divergent codes (TB->TBR, etc.) and treats Fantrax's empty
+    and "(N/A)" placeholders (a player with no MLB team) as no team.
+
+    Args:
+        raw: The Fantrax ``mlb_team`` value, possibly empty or "(N/A)".
+
+    Returns:
+        The normalized team abbreviation, or ``None`` when there is no team.
+    """
+    if not raw or raw == "(N/A)":
+        return None
+    return _FANTRAX_TEAM_TO_FG.get(raw, raw)
+
 
 # ── helpers ────────────────────────────────────────────────────────────
 
@@ -626,8 +652,10 @@ def build_player_id_map() -> tuple[pd.DataFrame, dict[str, int | None]]:
         else:
             match_quality = "unmatched"
 
-        # Team comes from FanGraphs (MLB team), not Fantrax
-        team = fg_team if fg_team else None
+        # Team comes from FanGraphs (MLB team) when matched; for a player with
+        # no FanGraphs row (deep prospects, etc.) fall back to the Fantrax MLB
+        # team, normalized to FanGraphs convention so the column is consistent.
+        team = fg_team if fg_team else _normalize_fantrax_team(mlb_team)
 
         rows.append({
             "fantrax_id": ftx_row["fantrax_id"],

@@ -55,6 +55,20 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+_PITCHER_POSITIONS = {"SP", "RP", "P"}
+
+
+def _is_pitcher(position: str | None) -> bool:
+    """Classify a Fantrax position string as a pitcher.
+
+    Fantrax encodes multi-eligibility as a comma list ("SP,RP"), so a plain
+    set-membership test misses those and drops the player into the hitters
+    table. Split on comma and treat the player as a pitcher if ANY eligibility
+    token is a pitching slot.
+    """
+    return any(tok.strip() in _PITCHER_POSITIONS for tok in str(position).split(","))
+
+
 def _latest_fantrax(prefix: str) -> pd.DataFrame | None:
     """Load the most recent date-stamped Fantrax CSV matching *prefix*."""
     files = sorted(FANTRAX.glob(f"{prefix}_*.csv"))
@@ -265,8 +279,6 @@ def _dash_missing(df: pd.DataFrame) -> pd.DataFrame:
 
 def _render_matchup_overview():
     """Weekly Matchup Overview: head-to-head category comparison."""
-    _PITCHER_POS = {"SP", "RP", "P"}
-
     all_rosters = _load_all_rosters()
     my_roster_df = _load_my_roster_df()
     hitters_sc = _load_parquet(SILVER / "statcast_hitters.parquet")
@@ -300,14 +312,14 @@ def _render_matchup_overview():
         return
     opp["player_name"] = opp["player_name"].str.strip()
     opp["player_type"] = opp["position"].apply(
-        lambda p: "Pitcher" if p in _PITCHER_POS else "Hitter"
+        lambda p: "Pitcher" if _is_pitcher(p) else "Hitter"
     )
 
     # Split my roster
     my = my_roster_df.copy()
     my = my[my["player_name"].notna() & (my["player_name"] != "None")]
     my["player_type"] = my["fantrax_position"].apply(
-        lambda p: "Pitcher" if p in _PITCHER_POS else "Hitter"
+        lambda p: "Pitcher" if _is_pitcher(p) else "Hitter"
     )
 
     id_map = _load_id_map()
@@ -437,9 +449,8 @@ def page_session_prep():
         & (my_roster_df["player_name"] != "None")
     ].copy()
 
-    _PITCHER_POSITIONS = {"SP", "RP", "P"}
     my_roster_df["player_type"] = my_roster_df["fantrax_position"].apply(
-        lambda p: "Pitcher" if p in _PITCHER_POSITIONS else "Hitter"
+        lambda p: "Pitcher" if _is_pitcher(p) else "Hitter"
     )
 
     hitters_statcast = _load_parquet(SILVER / "statcast_hitters.parquet")
