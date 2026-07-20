@@ -3,6 +3,9 @@ venv/
 bronze/data/
 silver/data/
 gold/data/
+football/bronze/data/
+football/silver/data/
+football/gold/data/
 *.duckdb
 __pycache__/
 *.pyc

@@ -1,0 +1,122 @@
+# ShadyNasty — fantasy football dynasty league on Fantrax.
+#
+# SINGLE SOURCE OF TRUTH. Everything the pipeline needs to know about the
+# league lives here: identifiers, roster shape, scoring, and (later) analytical
+# thresholds. Deliberately NOT split across a CLAUDE.md prose description or a
+# phantom standing_rules.yaml — those were the two config-drift bugs in the
+# baseball baseline (see docs/port-plan.md §"Two drift bugs"). Football scoring
+# is described in exactly ONE place: this file.
+
+league:
+  name: "ShadyNasty"
+  platform: fantrax
+  sport: football
+  league_id: "vqlp0t1rmk1rgquz"
+  teams: 12
+  format: dynasty
+  qb_format: single_qb        # SINGLE QB, not superflex
+  idp: true                   # defensive players are rostered and scored
+  scoring_model: points       # custom per-play points (encoded under `scoring`)
+
+fantrax:
+  # Same two-identifier situation as the baseball baseline: the manual
+  # Players-page export's Status column carries the OWNER label
+  # (my_team_label, used by fantrax_csv_import), while the live API returns the
+  # FANTASY TEAM NAME (my_team_name, used by fantrax_client). Fill both in from
+  # the live pull once the cookie is available — placeholders until confirmed.
+  my_team_label: "TODO_confirm_owner_label"
+  my_team_name: "TODO_confirm_team_name"
+  league_id: "vqlp0t1rmk1rgquz"
+
+roster:
+  # 23 players count against the roster; IR sits outside that count.
+  max_total: 23
+  active: 13
+  reserve: 10
+  ir: 2
+  # Starting lineup exactly as given: 7 offense + 4 IDP = 11 started.
+  # (active=13 exceeds the 11 started slots; the 2 extra active spots are not
+  # yet mapped to named slots — confirm against the live lineup UI.)
+  starting_lineup:
+    QB: 1
+    RB: 2
+    WR: 2
+    TE: 1
+    RWT_flex: 1               # RB / WR / TE
+    DL: 1
+    LB: 1
+    DB: 1
+    ID_flex: 1                # DL / LB / DB
+  # Position groups drive the identity-resolution TYPE GATE in
+  # football/silver/player_id_map.py. An offensive player only matches
+  # offensive stat sources and a defensive player only defensive ones, so an
+  # offensive "Josh Allen" (QB) can never fuzzy-match a defensive one (LB).
+  position_groups:
+    offense: [QB, RB, WR, TE]
+    defense: [DL, LB, DB]
+
+# ── Scoring (custom — this is the league's edge; encode it exactly) ──────────
+# Values are POINTS PER UNIT unless noted. Items flagged TODO/CONFIRM are not
+# yet verified against the official league rules doc — do not treat them as
+# final. Nothing here is invented to fill a gap: unknown values are left in the
+# `to_confirm` block below rather than guessed.
+scoring:
+  passing:
+    yards: 0.04              # per passing yard (i.e. 1 pt / 25 yds)
+    td: 4
+    completion: 0.1
+    first_down: 0.1          # per passing first down
+    interception: -2
+    # "Cumulative yardage bonuses" were described but no thresholds/values were
+    # given — see to_confirm.passing_yardage_bonuses.
+  rushing:
+    yards: 0.1               # per rushing yard
+    td: 6
+    attempt: 0.1
+    first_down: 0.25         # per rushing first down
+  receiving:
+    reception: 0.5           # 0.5 PPR
+    yards: 0.1               # per receiving yard
+    td: 6
+    first_down: 0.25         # per receiving first down
+  idp:
+    # CONFIRM every IDP value against the league rules doc before analytics
+    # depend on them — IDP scoring varies a lot between leagues.
+    solo_tackle: 1.0
+    assist_tackle: 0.5
+    sack: 2.0
+    interception: 3.0
+    forced_fumble: 2.0
+    tackle_for_loss: 0.5
+
+# Known-unknowns: values referenced or plausibly present but NOT yet confirmed.
+# Resolve each from the official league rules, then move it into `scoring`.
+to_confirm:
+  passing_yardage_bonuses: "cumulative passing-yardage bonus tiers (thresholds + points) not provided"
+  rushing_yardage_bonuses: "confirm whether cumulative rushing-yardage bonuses exist"
+  receiving_yardage_bonuses: "confirm whether cumulative receiving-yardage bonuses exist"
+  idp_values: "confirm solo/assist/sack/INT/FF/TFL point values against league rules"
+  idp_extras: "fumble recovery, pass defended, safety, defensive/return TD, QB hit — present? values?"
+  misc: "2-pt conversions, fumbles lost, and any position-specific multipliers"
+
+waivers:
+  type: FAAB
+  budget: 100
+  process_day: Wednesday
+  bids: sealed
+
+draft:
+  type: rookie                # dynasty rookie/startup draft
+  rounds: 5
+  order: manual_fixed         # non-snake, fixed manual order
+  date: "2026-08-27"
+
+data:
+  bronze_path: football/bronze/data
+  silver_path: football/silver/data
+  gold_path: football/gold/data
+
+# Analytical thresholds will live HERE under a `thresholds:` block when the gold
+# layer is built (single source of truth — no inline hardcoding, no phantom
+# standing_rules.yaml). Intentionally empty until then.
+thresholds: {}
