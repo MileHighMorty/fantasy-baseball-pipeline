@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/MileHighMorty/fantasy-baseball-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/MileHighMorty/fantasy-baseball-pipeline/actions/workflows/ci.yml)
 
+Python 3.10+ · pandas · rapidfuzz · pyarrow (parquet) · Streamlit · pytest · GitHub Actions
+
 A local analytics pipeline that pulls dynasty fantasy baseball data from several
 sources, resolves every player to a single stable identity across those sources,
 and turns the result into weekly roster decisions through an interactive dashboard.
