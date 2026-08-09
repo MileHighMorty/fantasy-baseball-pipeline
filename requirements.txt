@@ -7,7 +7,6 @@ curl_cffi
 pyyaml
 python-dotenv
 streamlit
-duckdb
 beautifulsoup4
 lxml
 rapidfuzz
