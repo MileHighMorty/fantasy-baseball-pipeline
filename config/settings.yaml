@@ -22,15 +22,13 @@ league:
     - HR
     - RBI
     - SB
-    - AVG
-    - OPS
+    - OBP
   pitching_categories:
     - W
-    - SV
     - K
     - ERA
     - WHIP
-    - QS
+    - SVH
 
 fantrax:
   # Two identifiers for the same team, because the two bronze feeds name it
