@@ -44,3 +44,28 @@ silver/player_id_map.py) is the centerpiece. Code quality matters everywhere.
 - Reference paths outside this repo (no sibling-project dependencies)
 - Add dependencies without flagging it
 - Touch files outside the stated scope of a task
+## Environment note (added 2026-08-09)
+Also cloned to WSL2 Ubuntu at ~/lab/fantasy-baseball-pipeline for CI/docs work.
+The Windows/venv instructions above remain canonical for RUNNING the pipeline.
+Do not attempt to run pipeline modules from the WSL clone without setting up a
+Linux venv first — and do not do that as a side effect of another task.
+
+## Current sprint: Rockies application (deadline 2026-08-24)
+
+### In scope
+- GitHub Actions CI running the existing 48 tests
+- README refinements
+- master -> main rename (update this file's Environment section when done)
+- Bug fixes surfaced by CI setup
+
+### OUT of scope until after submission
+- Orchestration (Dagster/Airflow/Prefect) — do not start
+- Cloud migration
+- player_master.csv -> database migration
+- Any refactor of silver/player_id_map.py or silver/player_universe.py
+
+### Rules
+- Write a plan and get approval before changing pipeline code
+- Tests must pass before any commit
+- Small commits, one concern each
+- Commit messages and README are read by hiring managers, not just tooling
