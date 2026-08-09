@@ -236,8 +236,10 @@ identity authoritative and corrections explicit.
 
 ## Testing
 
-`tests/test_player_id_map.py` runs 48 tests covering the parts most likely to
-break silently:
+The suite runs **54 tests across two files**, covering the parts most likely to
+break silently.
+
+**`tests/test_player_id_map.py` — 48 tests on identity resolution:**
 
 - **Normalization** of accents, two-way role suffixes, and whitespace, including
   that accents are preserved in the human-facing canonical name but stripped for
@@ -254,9 +256,24 @@ break silently:
   a rerun on the same players creates zero new keys, a two-way player gets two
   distinct keys, and an established ID is never overwritten.
 
+**`tests/test_regression_breakout.py` — 6 tests on the gold buy/sell invariants:**
+
+- **Sign convention**, pinning that the pitcher expected-vs-actual gap runs
+  opposite to hitters, so a still-elite pitcher running lucky is never emitted as
+  a sell.
+- **The hard-hit OR-clause**, which once flagged directional buys as sells: an
+  unlucky pitcher stays off the sell list even when his hard-hit percentile is
+  high.
+- **League-quality floors**, so "regression toward a still-elite level" is not a
+  sell and "improvement to a still-below-average level" is not a buy, in both
+  directions for hitters and pitchers.
+
 ```bash
 .\venv\Scripts\python.exe -m pytest
 ```
+
+CI runs this suite on Ubuntu against Python 3.10 and 3.12 on every push and pull
+request.
 
 ## How to run
 
