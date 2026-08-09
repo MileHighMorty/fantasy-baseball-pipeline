@@ -269,7 +269,11 @@ break silently.
   directions for hitters and pitchers.
 
 ```bash
+# Windows (PowerShell)
 .\venv\Scripts\python.exe -m pytest
+
+# macOS / Linux
+venv/bin/python -m pytest
 ```
 
 CI runs this suite on Ubuntu against Python 3.10 and 3.12 on every push and pull
@@ -281,23 +285,38 @@ request.
 git clone <repo-url>
 cd fantasy-baseball-pipeline
 
+# Windows (PowerShell)
 python -m venv venv
 .\venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# macOS / Linux
+python3 -m venv venv
+venv/bin/python -m pip install -r requirements.txt
 
 # Optional: copy .env.example to .env and add a FANTRAX_COOKIE for live pulls.
 # Without it, the pipeline uses the manual Fantrax CSV-export path.
 
 # Run the full bronze -> silver -> gold pipeline
-.\venv\Scripts\python.exe -m scripts.weekly_refresh
+.\venv\Scripts\python.exe -m scripts.weekly_refresh    # Windows
+venv/bin/python -m scripts.weekly_refresh              # macOS / Linux
 
 # Launch the dashboard
-.\venv\Scripts\streamlit run dashboard\app.py
+.\venv\Scripts\streamlit run dashboard\app.py          # Windows
+venv/bin/streamlit run dashboard/app.py                # macOS / Linux
 ```
 
 The refresh runs each layer in order and prints a timestamped summary after each
 one. Individual module failures are caught and logged without killing the rest of
-the run. The build is developed on Windows with PowerShell; the virtual
-environment is `venv`, not `.venv`.
+the run. The virtual environment is `venv`, not `.venv`.
+
+The pipeline is developed and run on Windows with PowerShell; the test suite is
+verified on Ubuntu against Python 3.10 and 3.12 in CI. The modules carry no
+OS-specific branching — paths go through `pathlib`, and every file read and write
+names its encoding explicitly — and the one Windows accommodation, a
+`sys.stdout.reconfigure(errors="replace")` guard for team names whose emoji a
+cp1252 console cannot encode, is inert elsewhere. What has not happened is an
+end-to-end run on macOS or Linux: CI exercises the test suite, not the live data
+pulls or the dashboard.
 
 ![Regression Watch: my roster](docs/screenshots/regression-watch.png)
 *Regression Watch, filtered to my own roster. These are my players whose results
