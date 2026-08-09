@@ -374,20 +374,8 @@ Continuous integration is the first piece of this roadmap actually built rather
 than planned: the test suite runs on every push and pull request against Python
 3.10 and 3.12.
 
-### Known limitations
+### Design decisions
 
-- **The FanGraphs bronze pull degrades to a stale snapshot.** The leaderboard
-  endpoint can return Cloudflare 403s. When it does, the silver loaders fall back
-  to the newest FanGraphs file on disk and emit a staleness warning rather than
-  failing. That is the right resilience tradeoff, but it means FanGraphs-derived
-  columns can lag, which is exactly why the matchable-rate framing above matters.
-- **The FanGraphs strikeout-rate signal is currently dormant.** Because the
-  FanGraphs pull is stale (the Cloudflare 403 above), the strikeout-rate component
-  of the streaming and waiver scores has no fresh data behind it. Rather than floor
-  the unknowns, the scorers apply a neutral-median policy: a player missing a K rate
-  lands mid-pack instead of at the bottom, so a real strikeout arm absent from the
-  stale snapshot is not unfairly buried. The signal comes back to life once a fresh
-  FanGraphs pull is restored.
 - **The MLB Stats probable-starter feed resolves through the MLBAM id.** MLB Stats
   returns the MLBAM player id for each probable starter, which is the same key as
   `savant_player_id`, so SP streaming joins probables to their enriched Statcast row
@@ -402,6 +390,29 @@ than planned: the test suite runs on every push and pull request against Python
   and hitters from 176 to 255, and a day's SP-streaming probable coverage from 10 to
   28 of 30. A player with no FanGraphs row is included with its FanGraphs-derived
   columns blank rather than excluded outright.
+- **The gold pitcher buy/sell sign convention is consistent across the whole
+  board.** The expected-vs-actual gap for pitchers runs opposite to hitters (a
+  lower ERA than expected is good), and older breakout/regression outputs once
+  carried that sign inconsistently. The gold breakout and regression modules and
+  the dashboard's Roster vs Available view now share one convention, so a buy means
+  the same thing everywhere. League-relative quality guards sit on top of it: the
+  board never flags a still-elite arm as a sell or a still-below-average bat as a
+  buy, with absolute floors at roughly .320 wOBA and 3.50 xERA.
+
+### Known limitations
+
+- **The FanGraphs bronze pull degrades to a stale snapshot.** The leaderboard
+  endpoint can return Cloudflare 403s. When it does, the silver loaders fall back
+  to the newest FanGraphs file on disk and emit a staleness warning rather than
+  failing. That is the right resilience tradeoff, but it means FanGraphs-derived
+  columns can lag, which is exactly why the matchable-rate framing above matters.
+- **The FanGraphs strikeout-rate signal is currently dormant.** Because the
+  FanGraphs pull is stale (the Cloudflare 403 above), the strikeout-rate component
+  of the streaming and waiver scores has no fresh data behind it. Rather than floor
+  the unknowns, the scorers apply a neutral-median policy: a player missing a K rate
+  lands mid-pack instead of at the bottom, so a real strikeout arm absent from the
+  stale snapshot is not unfairly buried. The signal comes back to life once a fresh
+  FanGraphs pull is restored.
 - **Breakout and regression lists have no role or innings filter.** Built off the
   full Savant population, they surface plenty of relievers. In a league that punts
   SVH and rewards starter volume, a role and innings-pitched filter that keeps the
@@ -414,14 +425,9 @@ than planned: the test suite runs on every push and pull request against Python
   of the current map. The right path is a MLBAM-anchored minors bridge that the main
   map joins into automatically at call-up via the shared MLBAM key, which is a larger
   Phase 2 effort.
+
+### Next steps
+
 - **Rolling-window time intelligence is the next feature.** Today's analysis works
   off the latest snapshot per source. The next build adds rolling windows so the
   pipeline can distinguish a genuine trend from a single hot or cold stretch.
-- **The gold pitcher buy/sell sign convention is consistent across the whole
-  board.** The expected-vs-actual gap for pitchers runs opposite to hitters (a
-  lower ERA than expected is good), and older breakout/regression outputs once
-  carried that sign inconsistently. The gold breakout and regression modules and
-  the dashboard's Roster vs Available view now share one convention, so a buy means
-  the same thing everywhere. League-relative quality guards sit on top of it: the
-  board never flags a still-elite arm as a sell or a still-below-average bat as a
-  buy, with absolute floors at roughly .320 wOBA and 3.50 xERA.
