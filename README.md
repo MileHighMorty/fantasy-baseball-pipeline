@@ -369,8 +369,8 @@ exotic: object storage in place of local `bronze/silver/gold` directories, the
 master in managed Postgres, the orchestrator on a schedule instead of on my
 laptop, and the dashboard deployed rather than launched with `streamlit run`. The
 substantive work is not the infrastructure — it is that credential handling,
-currently a `.env` holding Fantrax username, password, league ID, and session
-cookie, has to become a managed secret with rotation.
+currently a `.env` of Fantrax credentials, has to become a managed secret with
+rotation.
 
 Continuous integration is the first piece of this roadmap actually built rather
 than planned: the test suite runs on every push and pull request against Python
