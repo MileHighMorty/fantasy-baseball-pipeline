@@ -309,10 +309,54 @@ padding the list with other teams' players.*
 
 This is an honest accounting of where the boundaries are.
 
-- **The surrogate key is file-based, not yet a database.** `player_master.csv` is
-  durable and correct across runs, but a single CSV is the obvious production
-  boundary. The natural next step is moving the master into a real database with
-  the immutability rule enforced by constraints rather than by application logic.
+### The path to production
+
+Three gaps separate this pipeline from a production deployment. None is an
+oversight; each is a scope decision with a known cost and a known next step.
+
+**1. The surrogate key lives in a CSV, and that is the production boundary.**
+`player_master.csv` is durable and correct across runs — the immutability rule
+holds, keys are monotonic, and a rerun on the same players assigns zero new keys.
+But that rule is enforced in application logic, which means it holds exactly as
+long as every writer goes through that code path. Production enforces it in the
+storage layer: the master in Postgres, `res_key` as the primary key, source IDs
+under uniqueness constraints, and never-overwrite as a database constraint rather
+than a Python guard. The migration itself is mechanical. What it buys is that a
+careless writer fails loudly at the boundary instead of quietly corrupting an
+identity.
+
+**2. There is no orchestrator, and `weekly_refresh` is doing an orchestrator's
+job.** The refresh script runs the layers in order, catches per-module failures,
+and prints a timestamped summary. That is a sequential script standing in for a
+scheduler, and the difference shows up precisely where this pipeline is most
+fragile: there are no retries with backoff on the Cloudflare 403s that make the
+FanGraphs pull go stale, no alerting when a module fails, no way to backfill one
+date, and no dependency graph — a silver failure does not stop the gold modules
+downstream of it from running against stale inputs and producing a confident,
+wrong board. Production needs a real DAG. Dagster fits best, because its
+software-defined-asset model maps directly onto bronze/silver/gold
+materializations, and freshness policies turn today's printed staleness warning
+into a failing check.
+
+**3. It runs on one Windows machine, and everything it produces lands on local
+disk.** Ingestion is genuinely networked — the Fantrax client authenticates
+against the live API, and Savant, FanGraphs, and MLB Stats are all remote pulls —
+but every artifact those pulls produce is written to a local directory, and the
+schedule is "when I run it." That is the right cost for a personal
+research tool and the wrong one for anything with users. The cloud shape is not
+exotic: object storage in place of local `bronze/silver/gold` directories, the
+master in managed Postgres, the orchestrator on a schedule instead of on my
+laptop, and the dashboard deployed rather than launched with `streamlit run`. The
+substantive work is not the infrastructure — it is that credential handling,
+currently a `.env` holding Fantrax username, password, league ID, and session
+cookie, has to become a managed secret with rotation.
+
+Continuous integration is the first piece of this roadmap actually built rather
+than planned: the test suite runs on every push and pull request against Python
+3.10 and 3.12.
+
+### Known limitations
+
 - **The FanGraphs bronze pull degrades to a stale snapshot.** The leaderboard
   endpoint can return Cloudflare 403s. When it does, the silver loaders fall back
   to the newest FanGraphs file on disk and emit a staleness warning rather than
