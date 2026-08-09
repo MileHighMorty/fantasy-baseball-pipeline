@@ -1,5 +1,4 @@
 fantraxapi
-pybaseball
 pandas
 pyarrow
 requests
@@ -7,6 +6,4 @@ curl_cffi
 pyyaml
 python-dotenv
 streamlit
-beautifulsoup4
-lxml
 rapidfuzz
