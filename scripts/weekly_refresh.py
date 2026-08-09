@@ -114,8 +114,10 @@ def attempt_fantrax_fa_pull() -> None:
 def check_fantrax_freshness() -> None:
     """Warn loudly if the repo-local Fantrax roster export is missing or stale.
 
-    Fantrax data is fed by a manual export, so the pipeline cannot
-    refresh it.  This only warns — it never fails the pipeline.
+    Runs after the live pull has had its chance, so this fires only when
+    that pull was skipped (no cookie) or failed and the manual export on
+    disk is the newest roster data available.  This only warns — it never
+    fails the pipeline.
     """
     files = sorted(FANTRAX_DATA.glob("all_rosters_*.csv"))
     age_days: int | None = None
