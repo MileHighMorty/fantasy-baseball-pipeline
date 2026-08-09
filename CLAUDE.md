@@ -15,8 +15,11 @@ silver/player_id_map.py) is the centerpiece. Code quality matters everywhere.
   schema drift. Never silently coerce.
 - silver/: cleaned + enriched, parquet with explicit schema. Fuzzy-match confidence
   captured as a column.
-- gold/: decision-ready outputs. ALL thresholds come from config/standing_rules.yaml.
-  Never hardcode an analytical threshold in a gold module.
+- gold/: decision-ready outputs. Analytical thresholds are module-level constants
+  declared at the top of each gold module (HITTER_QUALITY_FLOOR, PITCHER_XERA_GAP,
+  UPGRADE_THRESHOLD, ...). Keep new ones there too: named, at module top, never
+  inline in a function body. Centralizing them into a config file is planned for
+  after the submission — config/standing_rules.yaml does not exist yet.
 
 ## Data contracts
 - Fantrax roster data: bronze/data/fantrax/all_rosters_YYYY-MM-DD.csv and
