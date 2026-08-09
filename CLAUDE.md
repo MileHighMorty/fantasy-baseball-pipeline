@@ -21,8 +21,10 @@ silver/player_id_map.py) is the centerpiece. Code quality matters everywhere.
 ## Data contracts
 - Fantrax roster data: bronze/data/fantrax/all_rosters_YYYY-MM-DD.csv and
   my_roster_YYYY-MM-DD.csv. Consumers glob and take latest by filename sort.
-  Fed by python -m bronze.fantrax_csv_import --input <export> (manual) or, if it
-  exists, bronze/fantrax_client.py (live). Same output contract either way.
+  Fed by bronze/fantrax_client.py (live) when FANTRAX_COOKIE is set — this is the
+  path scripts/weekly_refresh.py takes — falling back to python -m
+  bronze.fantrax_csv_import --input <export> (manual) otherwise. Same output
+  contract either way.
 - bronze/data/ is gitignored. Never commit data files. Tests use fixtures in
   tests/fixtures/ instead.
 
@@ -53,7 +55,7 @@ Linux venv first — and do not do that as a side effect of another task.
 ## Current sprint: Rockies application (deadline 2026-08-24)
 
 ### In scope
-- GitHub Actions CI running the existing 48 tests
+- GitHub Actions CI running the existing 54 tests
 - README refinements
 - master -> main rename (update this file's Environment section when done)
 - Bug fixes surfaced by CI setup
